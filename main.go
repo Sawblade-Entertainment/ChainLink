@@ -92,6 +92,11 @@ func main() {
 			fmt.Printf("Error installing: %v\n", err)
 			os.Exit(1)
 		}
+	case "serve":
+		if err := serve(); err != nil {
+			fmt.Printf("Error serving: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
 		printUsage()
@@ -101,7 +106,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: install, add, remove, help")
+	fmt.Println("Commands: install, add, remove, serve, help")
 }
 
 func handleRemove(name string) error {
