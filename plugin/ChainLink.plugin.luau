@@ -100,8 +100,14 @@ local function resolveTarget(target: string): Instance?
 	local ok, current = pcall(function() return game:GetService(parts[1]) end)
 	if not ok or not current then return nil end
 	for i = 2, #parts do
-		current = (current :: Instance):FindFirstChild(parts[i])
-		if not current then return nil end
+		local child = (current :: Instance):FindFirstChild(parts[i])
+		if not child then
+			-- Create missing target folders automatically
+			child = Instance.new("Folder")
+			child.Name = parts[i]
+			child.Parent = current
+		end
+		current = child
 	end
 	return current
 end

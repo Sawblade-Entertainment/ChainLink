@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
 )
 
@@ -36,10 +37,13 @@ type ProjectConfig struct {
 	Packages []GlobalPackageMapping `json:"packages"`
 }
 
-// GlobalPackage mappings allow syncing files from the ~/.chainlink/packages directory.
 type GlobalPackageMapping struct {
 	PackageName string `json:"package"`
 	Target      string `json:"target"`
+}
+
+type ChainToml struct {
+	Packages map[string]string `toml:"Packages"`
 }
 
 func defaultConfig() ProjectConfig {
@@ -48,7 +52,7 @@ func defaultConfig() ProjectConfig {
 		Roots: []RootMapping{
 			{Dir: "client", Target: "StarterPlayer.StarterPlayerScripts"},
 			{Dir: "server", Target: "ServerScriptService"},
-			{Dir: "shared", Target: "ReplicatedStorage"},
+			{Dir: "shared", Target: "ReplicatedStorage.shared"},
 			{Dir: "prefab", Target: "ServerStorage"},
 		},
 	}
@@ -56,27 +60,73 @@ func defaultConfig() ProjectConfig {
 
 func loadConfig() ProjectConfig {
 	cfg := defaultConfig()
+
+	// 1. Load chainlink.json (Overrides/Explicit config)
 	data, err := os.ReadFile(configFileName)
-	if err != nil {
-		return cfg
+	if err == nil {
+		var file ProjectConfig
+		if err := json.Unmarshal(data, &file); err == nil {
+			if file.Port != 0 {
+				cfg.Port = file.Port
+			}
+			if file.Token != "" {
+				cfg.Token = file.Token
+			}
+			if len(file.Roots) > 0 {
+				cfg.Roots = file.Roots
+			}
+			if len(file.Packages) > 0 {
+				cfg.Packages = file.Packages
+			}
+		}
 	}
-	var file ProjectConfig
-	if err := json.Unmarshal(data, &file); err != nil {
-		log.Printf("Warning: could not parse %s: %v (using defaults)", configFileName, err)
-		return cfg
+
+	// 2. Load chain.toml (Package discovery)
+	var tomlCfg ChainToml
+	if _, err := toml.DecodeFile("chain.toml", &tomlCfg); err == nil {
+		for pkgSpec := range tomlCfg.Packages {
+			// pkgSpec is e.g. "vibeonline/razorinput@0.1.0"
+			// We need to convert this to a folder name like "vibeonline_razorinput/0.1.0"
+
+			// Split "vibeonline/razorinput@0.1.0" into "vibeonline/razorinput" and "0.1.0"
+			parts := strings.Split(pkgSpec, "@")
+			var name, version string
+			if len(parts) == 2 {
+				name = parts[0]
+				version = parts[1]
+			} else {
+				name = pkgSpec
+				version = "latest" // fallback
+			}
+
+			// Convert "vibeonline/razorinput" to "vibeonline_razorinput"
+			folderName := strings.ReplaceAll(name, "/", "_")
+
+			// The logical package name for classification (e.g. "razorinput")
+			// is the part after the last slash in the name.
+			nameParts := strings.Split(name, "/")
+			shortName := nameParts[len(nameParts)-1]
+
+			// The actual disk path is ~/.chainlink/packages/vibeonline_razorinput/0.1.0
+			diskPath := folderName + "/" + version
+
+			// Avoid duplicates
+			exists := false
+			for _, p := range cfg.Packages {
+				if p.PackageName == diskPath {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				cfg.Packages = append(cfg.Packages, GlobalPackageMapping{
+					PackageName: diskPath, // Used for disk lookup
+					Target:      "ReplicatedStorage.packages." + shortName,
+				})
+			}
+		}
 	}
-	if file.Port != 0 {
-		cfg.Port = file.Port
-	}
-	if file.Token != "" {
-		cfg.Token = file.Token
-	}
-	if len(file.Roots) > 0 {
-		cfg.Roots = file.Roots
-	}
-	if len(file.Packages) > 0 {
-		cfg.Packages = file.Packages
-	}
+
 	return cfg
 }
 
@@ -266,7 +316,37 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 	}
 	ev := Event{Op: op, Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: c.ClassName}
 	if op != "DELETE" {
-		data, err := os.ReadFile(filepath.Join(s.root, filepath.FromSlash(rel)))
+		var abs string
+		if strings.Contains(rel, "/") {
+			parts := strings.SplitN(rel, "/", 2)
+			pkgName := parts[0]
+			home, _ := os.UserHomeDir()
+			isGlobal := false
+			for _, p := range s.cfg.Packages {
+				if p.PackageName == pkgName {
+					isGlobal = true
+					break
+				}
+			}
+			if isGlobal {
+				abs = filepath.Join(home, ".chainlink", "packages", pkgName, parts[1])
+			} else {
+				abs = filepath.Join(s.root, filepath.FromSlash(rel))
+			}
+		} else {
+			abs = filepath.Join(s.root, filepath.FromSlash(rel))
+		}
+
+		// Basic path traversal check
+		if !strings.HasPrefix(abs, s.root) {
+			home, _ := os.UserHomeDir()
+			pkgBase := filepath.Join(home, ".chainlink", "packages")
+			if !strings.HasPrefix(abs, pkgBase) {
+				return Event{}, false
+			}
+		}
+
+		data, err := os.ReadFile(abs)
 		if err != nil {
 			return Event{}, false
 		}
@@ -315,7 +395,6 @@ func jsonToLuau(v any) string {
 	}
 }
 
-// snapshot walks every root and returns CREATE events for all syncable files.
 func (s *Server) snapshot() []Event {
 	var out []Event
 
@@ -340,7 +419,14 @@ func (s *Server) snapshot() []Event {
 	// 2. Global packages snapshot
 	home, _ := os.UserHomeDir()
 	for _, p := range s.cfg.Packages {
+		// Package directories are stored as "user_package/version"
+		// We need to find the actual folder in ~/.chainlink/packages/
 		pkgRoot := filepath.Join(home, ".chainlink", "packages", p.PackageName)
+
+		// If p.PackageName is just the name, we might need to look for a directory
+		// that starts with that name and contains a version.
+		// However, usually, we map the specific version directory.
+
 		filepath.Walk(pkgRoot, func(pAbs string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return nil
@@ -350,7 +436,6 @@ func (s *Server) snapshot() []Event {
 				return nil
 			}
 			rel = filepath.ToSlash(rel)
-			// Prepend package name so classify() recognizes it
 			fullRel := p.PackageName + "/" + rel
 			if ev, ok := s.fileEvent(fullRel, "CREATE"); ok {
 				out = append(out, ev)
