@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,9 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
 )
+
+//go:embed bootstrap/*.luau
+var bootstrapFS embed.FS
 
 const (
 	longPollTimeout = 20 * time.Second
@@ -48,7 +52,8 @@ type ProjectConfig struct {
 }
 
 type ChainToml struct {
-	Packages map[string]string `toml:"Packages"`
+	Packages         map[string]string `toml:"Packages"`
+	DisableBootstrap bool              `toml:"disable_bootstrap"`
 }
 
 func packagesBase() string {
@@ -303,7 +308,7 @@ func mapPath(cfg ProjectConfig, rel string) (target string, base []string, rest 
 	return "", nil, "", false
 }
 
-func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
+func classify(cfg ProjectConfig, rel string, isDir bool, hasInit bool) Classified {
 	target, base, rest, ok := mapPath(cfg, rel)
 	if !ok {
 		return Classified{}
@@ -350,7 +355,15 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 		}
 		return Classified{Target: target, InstancePath: parent, ClassName: class, IsInit: true, Syncable: true}
 	}
-	return Classified{Target: target, InstancePath: append(parent, stem), ClassName: class, Syncable: true}
+
+	instancePath := append(parent, stem)
+	if hasInit {
+		// If bootstrapper is enabled and the directory has an init,
+		// siblings become children of the module (the init script).
+		instancePath = append(parent, "init", stem)
+	}
+
+	return Classified{Target: target, InstancePath: instancePath, ClassName: class, Syncable: true}
 }
 
 // ---------- Server ----------
@@ -414,7 +427,42 @@ func (s *Server) absPath(rel string) string {
 }
 
 func (s *Server) fileEvent(rel string, op string) (Event, bool) {
-	c := classify(s.conf(), rel, false)
+	// Check if we are in the server root and it has an init script.
+	hasInit := false
+
+	// Case 1: Standard module check (check parent directory)
+	dir := filepath.Dir(s.absPath(rel))
+	entries, err := os.ReadDir(dir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && (strings.EqualFold(e.Name(), "init.luau") || strings.EqualFold(e.Name(), "init.lua")) {
+				hasInit = true
+				break
+			}
+		}
+	}
+
+	// Case 2: Special case for the server root itself.
+	// If the project root 'server/' directory has an init script, then everything under 'server/'
+	// is a child of that root module.
+	if !hasInit {
+		for _, r := range s.conf().Roots {
+			if r.Dir == "server" && strings.HasPrefix(rel, "server/") {
+				serverRootAbs := filepath.Join(s.root, "server")
+				rootEntries, err := os.ReadDir(serverRootAbs)
+				if err == nil {
+					for _, e := range rootEntries {
+						if !e.IsDir() && (strings.EqualFold(e.Name(), "init.luau") || strings.EqualFold(e.Name(), "init.lua")) {
+							hasInit = true
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	c := classify(s.conf(), rel, false, hasInit)
 	if !c.Syncable {
 		return Event{}, false
 	}
@@ -477,6 +525,19 @@ func jsonToLuau(v any) string {
 // Reports whether an init file sits directly at the mapped root.
 func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
 	cfg := s.conf()
+
+	// Determine if the root directory being walked has an init script
+	hasInitAtRoot := false
+	entries, err := os.ReadDir(absDir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && (strings.EqualFold(e.Name(), "init.luau") || strings.EqualFold(e.Name(), "init.lua")) {
+				hasInitAtRoot = true
+				break
+			}
+		}
+	}
+
 	filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
@@ -487,7 +548,7 @@ func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
 		}
 		if ev, ok := s.fileEvent(rel, "CREATE"); ok {
 			*out = append(*out, ev)
-			if c := classify(cfg, rel, false); c.IsInit && len(c.InstancePath) == 1 && strings.HasPrefix(rel, pkgPrefix) {
+			if c := classify(cfg, rel, false, hasInitAtRoot); c.IsInit && len(c.InstancePath) == 1 && strings.HasPrefix(rel, pkgPrefix) {
 				rootInit = true
 			}
 		}
@@ -507,7 +568,7 @@ func (s *Server) packageEvents(p GlobalPackageMapping) []Event {
 	rel := pkgPrefix + p.PackageName
 	var evs []Event
 	if !s.walkFiles(s.absPath(rel), &evs) {
-		c := classify(s.conf(), rel, true)
+		c := classify(s.conf(), rel, true, false)
 		evs = append(evs, Event{Op: "CREATE", Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: "Folder"})
 	}
 	sortByDepth(evs)
@@ -522,6 +583,50 @@ func (s *Server) snapshot() []Event {
 	for _, p := range s.activePackages() {
 		out = append(out, s.packageEvents(p)...)
 	}
+
+	// Embed bootstrap scripts if not disabled in chain.toml
+	var tomlCfg ChainToml
+	if _, err := toml.DecodeFile(chainTomlName, &tomlCfg); err == nil && !tomlCfg.DisableBootstrap {
+		bootstrapFiles := []struct {
+			path   string
+			target string
+		}{
+			{"bootstrap/init.server.luau", "ServerScriptService"},
+			{"bootstrap/init.client.luau", "StarterPlayer.StarterPlayerScripts"},
+		}
+		for _, bf := range bootstrapFiles {
+			data, err := bootstrapFS.ReadFile(bf.path)
+			if err != nil {
+				log.Printf("Warning: could not read embedded bootstrap file %s: %v", bf.path, err)
+				continue
+			}
+			source := string(data)
+			if strings.HasSuffix(strings.ToLower(bf.path), ".luau") || strings.HasSuffix(strings.ToLower(bf.path), ".lua") {
+				header := "--!strict\n--!native\n--!optimize 2\n"
+				if !strings.HasPrefix(source, "--!strict") {
+					source = header + source
+				}
+			}
+			out = append(out, Event{
+				Op:           "CREATE",
+				Path:         bf.path,
+				Target:       bf.target,
+				InstancePath: []string{"init"},
+				ClassName:    "Script", // Default, though client is LocalScript. classify handles it better.
+				Source:       source,
+			})
+		}
+		// Correct class names for bootstrap
+		for i := range out {
+			ev := &out[i]
+			if ev.Path == "bootstrap/init.client.luau" {
+				ev.ClassName = "LocalScript"
+			} else if ev.Path == "bootstrap/init.server.luau" {
+				ev.ClassName = "Script"
+			}
+		}
+	}
+
 	sortByDepth(out)
 	return out
 }
@@ -582,7 +687,7 @@ func (s *Server) resolve(rel string) {
 		s.mu.Unlock()
 
 		if wasDir {
-			if c := classify(s.conf(), rel, true); c.Syncable {
+			if c := classify(s.conf(), rel, true, false); c.Syncable {
 				s.queue.Push(Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
 				log.Printf("[DELETE] %s/", rel)
 			}
@@ -715,7 +820,7 @@ func (s *Server) reloadPackages() {
 			continue
 		}
 		rel := pkgPrefix + p.PackageName
-		c := classify(oldCfg, rel, true)
+		c := classify(oldCfg, rel, true, false)
 		events = append(events, Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
 		s.forget(rel)
 		log.Printf("[PKG REMOVE] %s -> %s", p.PackageName, p.Target)
@@ -785,7 +890,7 @@ func (s *Server) primeDir(absDir string) {
 			s.mu.Lock()
 			s.known[rel] = true
 			s.mu.Unlock()
-		} else if c := classify(cfg, rel, false); c.Syncable {
+		} else if c := classify(cfg, rel, false, false); c.Syncable {
 			s.mu.Lock()
 			s.known[rel] = false
 			s.mu.Unlock()
