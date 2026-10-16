@@ -1,1 +1,0 @@
-print("Client bootstrap initialized")

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,10 +15,12 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
+
+	_ "embed"
 )
 
-//go:embed bootstrap/*.luau
-var bootstrapFS embed.FS
+//go:embed bootstrapper.luau
+var bootstrapper string
 
 const (
 	longPollTimeout = 20 * time.Second
@@ -675,18 +676,13 @@ func bootstrapEvents(cfg ProjectConfig) []Event {
 			continue
 		}
 		bs := bootstrapScripts[r.Dir]
-		data, err := bootstrapFS.ReadFile(bs.File)
-		if err != nil {
-			log.Printf("Warning: could not read embedded bootstrap file %s: %v", bs.File, err)
-			continue
-		}
 		out = append(out, Event{
 			Op:           "CREATE",
 			Path:         bs.File,
 			Target:       r.Target,
 			InstancePath: []string{"init"},
 			ClassName:    bs.Class,
-			Source:       addLuauHeader(string(data)),
+			Source:       addLuauHeader(bootstrapper),
 		})
 	}
 	return out
