@@ -1,6 +1,7 @@
 package main
 
 import (
+	"embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -15,12 +16,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/fsnotify/fsnotify"
-
-	_ "embed"
 )
 
-//go:embed bootstrapper.luau
-var bootstrapper string
+//go:embed bootstrap/*.luau
+var bootstrapFS embed.FS
 
 const (
 	longPollTimeout = 20 * time.Second
@@ -676,13 +675,18 @@ func bootstrapEvents(cfg ProjectConfig) []Event {
 			continue
 		}
 		bs := bootstrapScripts[r.Dir]
+		data, err := bootstrapFS.ReadFile(bs.File)
+		if err != nil {
+			log.Printf("Warning: could not read embedded bootstrap file %s: %v", bs.File, err)
+			continue
+		}
 		out = append(out, Event{
 			Op:           "CREATE",
 			Path:         bs.File,
 			Target:       r.Target,
 			InstancePath: []string{"init"},
 			ClassName:    bs.Class,
-			Source:       addLuauHeader(bootstrapper),
+			Source:       addLuauHeader(string(data)),
 		})
 	}
 	return out
@@ -732,34 +736,22 @@ func (s *Server) resolve(rel string) {
 		if !wasKnown {
 			return
 		}
-		var children []string
-		childIsDir := map[string]bool{}
-
 		s.mu.Lock()
 		delete(s.known, rel)
 		if wasDir {
-			prefix := rel + "/"
-			for k, isDir := range s.known {
-				if !strings.HasPrefix(k, prefix) {
-					continue
-				}
-				if !strings.Contains(k[len(prefix):], "/") {
-					children = append(children, k) // direct child
-					childIsDir[k] = isDir
-				}
-				delete(s.known, k)
-			}
-			// Everything under the folder is gone; drop its ownership claims.
-			for key, owner := range s.owners {
-				if strings.HasPrefix(owner, prefix) {
-					delete(s.owners, key)
+			for k := range s.known {
+				if strings.HasPrefix(k, rel+"/") {
+					delete(s.known, k)
 				}
 			}
 		}
 		s.mu.Unlock()
 
 		if wasDir {
-			s.removeDir(rel, children, childIsDir)
+			if c := classify(s.conf(), rel, true); c.Syncable {
+				s.queue.Push(Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
+				log.Printf("[DELETE] %s/", rel)
+			}
 			return
 		}
 		if ev, ok := s.fileEvent(rel, "DELETE"); ok && s.release(ev) {
