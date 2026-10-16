@@ -46,6 +46,13 @@ func SetupProjectBin(tools map[string]string) error {
 		tag := parts[1]
 
 		globalToolDir := filepath.Join(home, ".chainlink", "tools", name, tag)
+		if !strings.HasPrefix(tag, "v") {
+			vTag := "v" + tag
+			vGlobalToolDir := filepath.Join(home, ".chainlink", "tools", name, vTag)
+			if _, err := os.Stat(vGlobalToolDir); err == nil {
+				globalToolDir = vGlobalToolDir
+			}
+		}
 
 		// Find the actual binary inside the global tool directory
 		var binaryPath string
