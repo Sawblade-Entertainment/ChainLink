@@ -20,8 +20,10 @@ import (
 const (
 	longPollTimeout = 20 * time.Second
 	debounceWindow  = 75 * time.Millisecond
+	reloadDebounce  = 500 * time.Millisecond
 	maxQueueLen     = 10000
 	configFileName  = "chainlink.json"
+	chainTomlName   = "chain.toml"
 	packageSrcDir   = "src"
 	pkgPrefix       = "~pkg/" // namespace for package rel paths
 )
@@ -57,6 +59,11 @@ func packagesBase() string {
 func dirExists(p string) bool {
 	info, err := os.Stat(p)
 	return err == nil && info.IsDir()
+}
+
+func isUnder(base, p string) bool {
+	rel, err := filepath.Rel(base, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // findPackageDir tries common on-disk layouts for "scope/name" + version.
@@ -131,7 +138,7 @@ func loadConfig() ProjectConfig {
 	}
 
 	var tomlCfg ChainToml
-	if _, err := toml.DecodeFile("chain.toml", &tomlCfg); err == nil {
+	if _, err := toml.DecodeFile(chainTomlName, &tomlCfg); err == nil {
 		for _, spec := range tomlCfg.Packages {
 			name, version := spec, "latest"
 			if i := strings.LastIndex(spec, "@"); i > 0 {
@@ -144,7 +151,7 @@ func loadConfig() ProjectConfig {
 			})
 		}
 	} else if !os.IsNotExist(err) {
-		log.Printf("Warning: chain.toml could not be parsed: %v", err)
+		log.Printf("Warning: %s could not be parsed: %v", chainTomlName, err)
 	}
 
 	// Resolve src/root and dedupe.
@@ -158,8 +165,36 @@ func loadConfig() ProjectConfig {
 		seen[p.PackageName] = true
 		pkgs = append(pkgs, p)
 	}
+	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].PackageName < pkgs[j].PackageName })
 	cfg.Packages = pkgs
 	return cfg
+}
+
+func pkgKey(p GlobalPackageMapping) string { return p.PackageName + "\x00" + p.Target }
+
+// presentPackages filters to packages whose mapped folder exists on disk.
+func presentPackages(cfg ProjectConfig) []GlobalPackageMapping {
+	var out []GlobalPackageMapping
+	for _, p := range cfg.Packages {
+		if dirExists(filepath.Join(packagesBase(), filepath.FromSlash(p.PackageName))) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// packageRootOf returns the package root rel path ("~pkg/...") that rel belongs to.
+func packageRootOf(cfg ProjectConfig, rel string) (string, bool) {
+	if !strings.HasPrefix(rel, pkgPrefix) {
+		return "", false
+	}
+	inner := strings.TrimPrefix(rel, pkgPrefix)
+	for _, p := range cfg.Packages {
+		if inner == p.PackageName || strings.HasPrefix(inner, p.PackageName+"/") {
+			return pkgPrefix + p.PackageName, true
+		}
+	}
+	return "", false
 }
 
 // ---------- Events / Queue ----------
@@ -210,9 +245,10 @@ func (q *Queue) Push(evs ...Event) {
 	if len(q.events) > maxQueueLen {
 		q.events = q.events[len(q.events)-maxQueueLen:]
 	}
-	close(q.notify)
-	q.notify = make(chan struct{})
+	old := q.notify
+	q.notify = make(chan struct{}) // fresh channel for future waiters
 	q.mu.Unlock()
+	close(old) // wake everyone waiting on the old one
 }
 
 func (q *Queue) Since(since uint64) (events []Event, latest uint64, ok bool) {
@@ -248,8 +284,6 @@ type Classified struct {
 	Syncable     bool
 }
 
-// mapPath returns the Roblox target and base instance segments for rel,
-// plus the remaining path below the mapped root.
 func mapPath(cfg ProjectConfig, rel string) (target string, base []string, rest string, ok bool) {
 	if strings.HasPrefix(rel, pkgPrefix) {
 		inner := strings.TrimPrefix(rel, pkgPrefix)
@@ -312,7 +346,7 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 
 	if strings.EqualFold(stem, "init") {
 		if len(parent) == 0 {
-			return Classified{} // init directly at a project root has nowhere to go
+			return Classified{}
 		}
 		return Classified{Target: target, InstancePath: parent, ClassName: class, IsInit: true, Syncable: true}
 	}
@@ -322,21 +356,43 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 // ---------- Server ----------
 
 type Server struct {
-	cfg     ProjectConfig
 	root    string
 	queue   *Queue
 	watcher *fsnotify.Watcher
 
-	mu      sync.Mutex
-	known   map[string]bool
-	pending map[string]*time.Timer
+	cfgMu  sync.RWMutex
+	cfg    ProjectConfig
+	active []GlobalPackageMapping // packages currently synced (present on disk)
+
+	reloadMu sync.Mutex // serializes reloadPackages
+
+	mu          sync.Mutex
+	known       map[string]bool
+	pending     map[string]*time.Timer
+	reloadTimer *time.Timer
+}
+
+func (s *Server) conf() ProjectConfig {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
+func (s *Server) activePackages() []GlobalPackageMapping {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.active
 }
 
 func (s *Server) relPath(abs string) (string, bool) {
 	base := packagesBase()
-	if rel, err := filepath.Rel(base, abs); err == nil && !strings.HasPrefix(rel, "..") {
+	if isUnder(base, abs) {
+		rel, err := filepath.Rel(base, abs)
+		if err != nil {
+			return "", false
+		}
 		rel = filepath.ToSlash(rel)
-		for _, p := range s.cfg.Packages {
+		for _, p := range s.conf().Packages {
 			if rel == p.PackageName || strings.HasPrefix(rel, p.PackageName+"/") {
 				return pkgPrefix + rel, true
 			}
@@ -358,7 +414,7 @@ func (s *Server) absPath(rel string) string {
 }
 
 func (s *Server) fileEvent(rel string, op string) (Event, bool) {
-	c := classify(s.cfg, rel, false)
+	c := classify(s.conf(), rel, false)
 	if !c.Syncable {
 		return Event{}, false
 	}
@@ -414,6 +470,7 @@ func jsonToLuau(v any) string {
 // walkFiles emits CREATE events for every syncable file under absDir.
 // Reports whether an init file sits directly at the mapped root.
 func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
+	cfg := s.conf()
 	filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
 		if err != nil || info.IsDir() {
 			return nil
@@ -424,7 +481,7 @@ func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
 		}
 		if ev, ok := s.fileEvent(rel, "CREATE"); ok {
 			*out = append(*out, ev)
-			if c := classify(s.cfg, rel, false); c.IsInit && len(c.InstancePath) == 1 {
+			if c := classify(cfg, rel, false); c.IsInit && len(c.InstancePath) == 1 && strings.HasPrefix(rel, pkgPrefix) {
 				rootInit = true
 			}
 		}
@@ -433,23 +490,33 @@ func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
 	return rootInit
 }
 
+func sortByDepth(evs []Event) {
+	sort.SliceStable(evs, func(i, j int) bool {
+		return len(evs[i].InstancePath) < len(evs[j].InstancePath)
+	})
+}
+
+// packageEvents builds an ordered CREATE batch for one package.
+func (s *Server) packageEvents(p GlobalPackageMapping) []Event {
+	rel := pkgPrefix + p.PackageName
+	var evs []Event
+	if !s.walkFiles(s.absPath(rel), &evs) {
+		c := classify(s.conf(), rel, true)
+		evs = append(evs, Event{Op: "CREATE", Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: "Folder"})
+	}
+	sortByDepth(evs)
+	return evs
+}
+
 func (s *Server) snapshot() []Event {
 	var out []Event
-	for _, r := range s.cfg.Roots {
+	for _, r := range s.conf().Roots {
 		s.walkFiles(filepath.Join(s.root, r.Dir), &out)
 	}
-	for _, p := range s.cfg.Packages {
-		rel := pkgPrefix + p.PackageName
-		if !s.walkFiles(s.absPath(rel), &out) {
-			// No init: the package is a plain Folder.
-			c := classify(s.cfg, rel, true)
-			out = append(out, Event{Op: "CREATE", Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: "Folder"})
-		}
+	for _, p := range s.activePackages() {
+		out = append(out, s.packageEvents(p)...)
 	}
-	// Parents (and init files, which share their folder's depth) before children.
-	sort.SliceStable(out, func(i, j int) bool {
-		return len(out[i].InstancePath) < len(out[j].InstancePath)
-	})
+	sortByDepth(out)
 	return out
 }
 
@@ -466,11 +533,28 @@ func (s *Server) schedule(abs string) {
 	s.pending[rel] = time.AfterFunc(debounceWindow, func() { s.resolve(rel) })
 }
 
+func (s *Server) scheduleReload() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.reloadTimer != nil {
+		s.reloadTimer.Stop()
+	}
+	s.reloadTimer = time.AfterFunc(reloadDebounce, s.reloadPackages)
+}
+
 func (s *Server) resolve(rel string) {
 	s.mu.Lock()
 	delete(s.pending, rel)
 	wasDir, wasKnown := s.known[rel]
 	s.mu.Unlock()
+
+	// Package roots appearing/disappearing are handled by reloadPackages,
+	// so we don't double-emit CREATE/DELETE for whole packages here.
+	if root, isPkg := packageRootOf(s.conf(), rel); isPkg {
+		if rel == root || !dirExists(s.absPath(root)) {
+			return
+		}
+	}
 
 	abs := s.absPath(rel)
 	info, err := os.Stat(abs)
@@ -492,7 +576,7 @@ func (s *Server) resolve(rel string) {
 		s.mu.Unlock()
 
 		if wasDir {
-			if c := classify(s.cfg, rel, true); c.Syncable {
+			if c := classify(s.conf(), rel, true); c.Syncable {
 				s.queue.Push(Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
 				log.Printf("[DELETE] %s/", rel)
 			}
@@ -551,16 +635,126 @@ func (s *Server) resolve(rel string) {
 	log.Printf("[%s] %s -> %s.%s (%s)", op, rel, ev.Target, strings.Join(ev.InstancePath, "."), ev.ClassName)
 }
 
+// forget drops known entries and watches for a package root.
+func (s *Server) forget(rootRel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, isDir := range s.known {
+		if k == rootRel || strings.HasPrefix(k, rootRel+"/") {
+			if isDir {
+				s.watcher.Remove(s.absPath(k))
+			}
+			delete(s.known, k)
+		}
+	}
+	for k, t := range s.pending {
+		if k == rootRel || strings.HasPrefix(k, rootRel+"/") {
+			t.Stop()
+			delete(s.pending, k)
+		}
+	}
+}
+
+// watchPackageAncestors watches the packages base and every existing folder on
+// the way to each declared package, so installs/uninstalls/src changes are seen.
+func (s *Server) watchPackageAncestors(cfg ProjectConfig) {
+	base := packagesBase()
+	os.MkdirAll(base, 0o755)
+	s.watcher.Add(base)
+	for _, p := range cfg.Packages {
+		cur := base
+		for _, part := range strings.Split(p.PackageName, "/") {
+			cur = filepath.Join(cur, part)
+			if !dirExists(cur) {
+				break
+			}
+			s.watcher.Add(cur)
+		}
+	}
+}
+
+// reloadPackages re-reads package config and diffs against what's synced.
+func (s *Server) reloadPackages() {
+	s.reloadMu.Lock()
+	defer s.reloadMu.Unlock()
+
+	fresh := loadConfig()
+
+	s.cfgMu.Lock()
+	oldCfg := s.cfg
+	oldActive := s.active
+	newCfg := oldCfg // roots/port/token require a restart
+	newCfg.Packages = fresh.Packages
+	newActive := presentPackages(newCfg)
+	s.cfg = newCfg
+	s.active = newActive
+	s.cfgMu.Unlock()
+
+	s.watchPackageAncestors(newCfg)
+
+	oldSet := map[string]bool{}
+	for _, p := range oldActive {
+		oldSet[pkgKey(p)] = true
+	}
+	newSet := map[string]bool{}
+	for _, p := range newActive {
+		newSet[pkgKey(p)] = true
+	}
+
+	var events []Event
+
+	// Removals first so a version bump on the same target deletes before creating.
+	for _, p := range oldActive {
+		if newSet[pkgKey(p)] {
+			continue
+		}
+		rel := pkgPrefix + p.PackageName
+		c := classify(oldCfg, rel, true)
+		events = append(events, Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
+		s.forget(rel)
+		log.Printf("[PKG REMOVE] %s -> %s", p.PackageName, p.Target)
+	}
+
+	for _, p := range newActive {
+		if oldSet[pkgKey(p)] {
+			continue
+		}
+		s.primeDir(s.absPath(pkgPrefix + p.PackageName))
+		evs := s.packageEvents(p)
+		events = append(events, evs...)
+		log.Printf("[PKG ADD] %s -> %s (%d events)", p.PackageName, p.Target, len(evs))
+	}
+
+	s.queue.Push(events...)
+}
+
+func (s *Server) isConfigFile(abs string) bool {
+	if filepath.Dir(abs) != s.root {
+		return false
+	}
+	b := filepath.Base(abs)
+	return b == chainTomlName || b == configFileName
+}
+
 func (s *Server) watchLoop() {
+	base := packagesBase()
 	for {
 		select {
 		case event, ok := <-s.watcher.Events:
 			if !ok {
 				return
 			}
-			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) != 0 {
-				s.schedule(event.Name)
+			if event.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Remove|fsnotify.Rename) == 0 {
+				continue
 			}
+			if s.isConfigFile(event.Name) {
+				s.scheduleReload()
+				continue
+			}
+			if isUnder(base, event.Name) {
+				s.scheduleReload() // no-op if the package set didn't change
+			}
+			s.schedule(event.Name)
 		case err, ok := <-s.watcher.Errors:
 			if !ok {
 				return
@@ -571,6 +765,7 @@ func (s *Server) watchLoop() {
 }
 
 func (s *Server) primeDir(absDir string) {
+	cfg := s.conf()
 	filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil
@@ -581,19 +776,23 @@ func (s *Server) primeDir(absDir string) {
 		}
 		if info.IsDir() {
 			s.watcher.Add(p)
+			s.mu.Lock()
 			s.known[rel] = true
-		} else if c := classify(s.cfg, rel, false); c.Syncable {
+			s.mu.Unlock()
+		} else if c := classify(cfg, rel, false); c.Syncable {
+			s.mu.Lock()
 			s.known[rel] = false
+			s.mu.Unlock()
 		}
 		return nil
 	})
 }
 
 func (s *Server) primeKnown() {
-	for _, r := range s.cfg.Roots {
+	for _, r := range s.conf().Roots {
 		s.primeDir(filepath.Join(s.root, r.Dir))
 	}
-	for _, p := range s.cfg.Packages {
+	for _, p := range s.activePackages() {
 		s.primeDir(s.absPath(pkgPrefix + p.PackageName))
 	}
 }
@@ -602,7 +801,7 @@ func (s *Server) primeKnown() {
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.Token != "" && r.Header.Get("X-ChainLink-Token") != s.cfg.Token {
+		if tok := s.conf().Token; tok != "" && r.Header.Get("X-ChainLink-Token") != tok {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -614,37 +813,58 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "sessionId": s.queue.sessionID})
 }
 
+// handleChanges long-polls for events after ?since=<seq>.
+// A missing/mismatched session or a gap in the queue returns a full snapshot.
+// An empty poll blocks until an event arrives or longPollTimeout elapses.
 func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
-	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
-	session := r.URL.Query().Get("session")
+	q := r.URL.Query()
+	since, _ := strconv.ParseUint(q.Get("since"), 10, 64)
+	session := q.Get("session")
 
-	needFull := (since == 0 && session == "") || session != s.queue.sessionID
-	if !needFull {
-		events, latest, ok := s.queue.Since(since)
-		if !ok {
-			needFull = true
-		} else if len(events) > 0 {
-			writeJSON(w, ChangesResponse{SessionID: s.queue.sessionID, Seq: latest, Events: events})
-			return
-		}
+	sendFull := func() {
+		// Read seq before snapshotting so nothing pushed during the walk is skipped.
+		s.queue.mu.Lock()
+		seq := s.queue.seq
+		s.queue.mu.Unlock()
+		writeJSON(w, ChangesResponse{
+			SessionID: s.queue.sessionID,
+			Seq:       seq,
+			Full:      true,
+			Events:    s.snapshot(),
+		})
 	}
-	if needFull {
-		_, latest, _ := s.queue.Since(0)
-		writeJSON(w, ChangesResponse{SessionID: s.queue.sessionID, Seq: latest, Full: true, Events: s.snapshot()})
+
+	// Only a missing or different session means "I have nothing, give me everything".
+	// since==0 with a matching session is a normal long poll on a fresh queue.
+	if session != s.queue.sessionID {
+		sendFull()
 		return
 	}
 
-	deadline := time.After(longPollTimeout)
+	deadline := time.NewTimer(longPollTimeout)
+	defer deadline.Stop()
+
 	for {
-		events, latest, _ := s.queue.Since(since)
+		// Grab the notify channel BEFORE checking the queue so a push between
+		// the check and the wait can't be missed.
+		notify := s.queue.Notify()
+
+		events, latest, ok := s.queue.Since(since)
+		if !ok {
+			sendFull()
+			return
+		}
 		if len(events) > 0 {
 			writeJSON(w, ChangesResponse{SessionID: s.queue.sessionID, Seq: latest, Events: events})
 			return
 		}
-		notify := s.queue.Notify()
+
 		select {
 		case <-notify:
-		case <-deadline:
+			// Woken by a push; loop and re-check. If it was a spurious wake with
+			// nothing new for us, we simply wait again on a fresh channel.
+			continue
+		case <-deadline.C:
 			writeJSON(w, ChangesResponse{SessionID: s.queue.sessionID, Seq: latest, Events: []Event{}})
 			return
 		case <-r.Context().Done():
@@ -655,13 +875,15 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	w.Header().Set("Cache-Control", "no-store")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("write error: %v", err)
+	}
 }
 
-// ---------- Entry point ----------
+// ---------- Entry ----------
 
 func serve() error {
-	fmt.Println("Starting ChainLink serve...")
 	cfg := loadConfig()
 
 	root, err := os.Getwd()
@@ -683,13 +905,16 @@ func serve() error {
 
 	s := &Server{
 		cfg:     cfg,
+		active:  presentPackages(cfg),
 		root:    root,
 		queue:   NewQueue(),
 		watcher: watcher,
 		known:   map[string]bool{},
 		pending: map[string]*time.Timer{},
 	}
-	watcher.Add(root)
+
+	watcher.Add(root)            // catches chain.toml / chainlink.json edits
+	s.watchPackageAncestors(cfg) // catches installs/uninstalls under ~/.chainlink/packages
 	s.primeKnown()
 	go s.watchLoop()
 
@@ -704,7 +929,7 @@ func serve() error {
 	}
 	for _, p := range cfg.Packages {
 		abs := s.absPath(pkgPrefix + p.PackageName)
-		status := "NOT FOUND"
+		status := "NOT INSTALLED (will sync when it appears)"
 		if dirExists(abs) {
 			var tmp []Event
 			if s.walkFiles(abs, &tmp) {
@@ -715,6 +940,7 @@ func serve() error {
 		}
 		fmt.Printf("  pkg %s -> %s  [%s]\n", abs, p.Target, status)
 	}
+	fmt.Println("Watching chain.toml and ~/.chainlink/packages for package changes.")
 	fmt.Println("Press Ctrl+C to stop.")
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
