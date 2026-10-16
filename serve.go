@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,13 +22,20 @@ const (
 	debounceWindow  = 75 * time.Millisecond
 	maxQueueLen     = 10000
 	configFileName  = "chainlink.json"
+	packageSrcDir   = "src"
+	pkgPrefix       = "~pkg/" // namespace for package rel paths
 )
 
 // ---------- Config ----------
 
 type RootMapping struct {
-	Dir    string `json:"dir"`    // "client"
-	Target string `json:"target"` // "StarterPlayer.StarterPlayerScripts"
+	Dir    string `json:"dir"`
+	Target string `json:"target"`
+}
+
+type GlobalPackageMapping struct {
+	PackageName string `json:"package"` // disk path under ~/.chainlink/packages
+	Target      string `json:"target"`  // e.g. "ReplicatedStorage.packages.razorinput"
 }
 
 type ProjectConfig struct {
@@ -37,13 +45,56 @@ type ProjectConfig struct {
 	Packages []GlobalPackageMapping `json:"packages"`
 }
 
-type GlobalPackageMapping struct {
-	PackageName string `json:"package"`
-	Target      string `json:"target"`
-}
-
 type ChainToml struct {
 	Packages map[string]string `toml:"Packages"`
+}
+
+func packagesBase() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".chainlink", "packages")
+}
+
+func dirExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && info.IsDir()
+}
+
+// findPackageDir tries common on-disk layouts for "scope/name" + version.
+func findPackageDir(name, version string) string {
+	short := name[strings.LastIndex(name, "/")+1:]
+	candidates := []string{
+		strings.ReplaceAll(name, "/", "_") + "/" + version,
+		name + "/" + version,
+		short + "/" + version,
+		strings.ReplaceAll(name, "/", "_") + "@" + version,
+	}
+	for _, c := range candidates {
+		if dirExists(filepath.Join(packagesBase(), filepath.FromSlash(c))) {
+			return c
+		}
+	}
+	return candidates[0]
+}
+
+// withSrc returns "<p>/src" if it exists, otherwise p (copy the root).
+func withSrc(p string) string {
+	p = strings.Trim(filepath.ToSlash(p), "/")
+	if strings.HasSuffix(p, "/"+packageSrcDir) {
+		return p
+	}
+	if dirExists(filepath.Join(packagesBase(), filepath.FromSlash(p), packageSrcDir)) {
+		return p + "/" + packageSrcDir
+	}
+	return p
+}
+
+// splitTarget: "ReplicatedStorage.packages.razorinput" -> ("ReplicatedStorage.packages", "razorinput")
+func splitTarget(t string) (parent, name string) {
+	i := strings.LastIndex(t, ".")
+	if i < 0 {
+		return "", t
+	}
+	return t[:i], t[i+1:]
 }
 
 func defaultConfig() ProjectConfig {
@@ -61,11 +112,11 @@ func defaultConfig() ProjectConfig {
 func loadConfig() ProjectConfig {
 	cfg := defaultConfig()
 
-	// 1. Load chainlink.json (Overrides/Explicit config)
-	data, err := os.ReadFile(configFileName)
-	if err == nil {
+	if data, err := os.ReadFile(configFileName); err == nil {
 		var file ProjectConfig
-		if err := json.Unmarshal(data, &file); err == nil {
+		if err := json.Unmarshal(data, &file); err != nil {
+			log.Printf("Warning: %s is invalid: %v", configFileName, err)
+		} else {
 			if file.Port != 0 {
 				cfg.Port = file.Port
 			}
@@ -75,58 +126,39 @@ func loadConfig() ProjectConfig {
 			if len(file.Roots) > 0 {
 				cfg.Roots = file.Roots
 			}
-			if len(file.Packages) > 0 {
-				cfg.Packages = file.Packages
-			}
+			cfg.Packages = file.Packages
 		}
 	}
 
-	// 2. Load chain.toml (Package discovery)
 	var tomlCfg ChainToml
 	if _, err := toml.DecodeFile("chain.toml", &tomlCfg); err == nil {
-		for pkgSpec := range tomlCfg.Packages {
-			// pkgSpec is e.g. "vibeonline/razorinput@0.1.0"
-			// We need to convert this to a folder name like "vibeonline_razorinput/0.1.0"
-
-			// Split "vibeonline/razorinput@0.1.0" into "vibeonline/razorinput" and "0.1.0"
-			parts := strings.Split(pkgSpec, "@")
-			var name, version string
-			if len(parts) == 2 {
-				name = parts[0]
-				version = parts[1]
-			} else {
-				name = pkgSpec
-				version = "latest" // fallback
+		for _, spec := range tomlCfg.Packages {
+			name, version := spec, "latest"
+			if i := strings.LastIndex(spec, "@"); i > 0 {
+				name, version = spec[:i], spec[i+1:]
 			}
-
-			// Convert "vibeonline/razorinput" to "vibeonline_razorinput"
-			folderName := strings.ReplaceAll(name, "/", "_")
-
-			// The logical package name for classification (e.g. "razorinput")
-			// is the part after the last slash in the name.
-			nameParts := strings.Split(name, "/")
-			shortName := nameParts[len(nameParts)-1]
-
-			// The actual disk path is ~/.chainlink/packages/vibeonline_razorinput/0.1.0
-			diskPath := folderName + "/" + version
-
-			// Avoid duplicates
-			exists := false
-			for _, p := range cfg.Packages {
-				if p.PackageName == diskPath {
-					exists = true
-					break
-				}
-			}
-			if !exists {
-				cfg.Packages = append(cfg.Packages, GlobalPackageMapping{
-					PackageName: diskPath, // Used for disk lookup
-					Target:      "ReplicatedStorage.packages." + shortName,
-				})
-			}
+			short := name[strings.LastIndex(name, "/")+1:]
+			cfg.Packages = append(cfg.Packages, GlobalPackageMapping{
+				PackageName: findPackageDir(name, version),
+				Target:      "ReplicatedStorage.packages." + short,
+			})
 		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("Warning: chain.toml could not be parsed: %v", err)
 	}
 
+	// Resolve src/root and dedupe.
+	seen := map[string]bool{}
+	var pkgs []GlobalPackageMapping
+	for _, p := range cfg.Packages {
+		p.PackageName = withSrc(p.PackageName)
+		if seen[p.PackageName] {
+			continue
+		}
+		seen[p.PackageName] = true
+		pkgs = append(pkgs, p)
+	}
+	cfg.Packages = pkgs
 	return cfg
 }
 
@@ -134,13 +166,13 @@ func loadConfig() ProjectConfig {
 
 type Event struct {
 	Seq          uint64   `json:"seq"`
-	Op           string   `json:"op"`   // CREATE | UPDATE | DELETE
-	Path         string   `json:"path"` // relative, forward-slash (for logging)
+	Op           string   `json:"op"`
+	Path         string   `json:"path"`
 	Target       string   `json:"target"`
 	InstancePath []string `json:"instancePath"`
 	ClassName    string   `json:"className,omitempty"`
 	Source       string   `json:"source,omitempty"`
-	KeepChildren bool     `json:"keepChildren,omitempty"` // DELETE of init.* -> demote to Folder
+	KeepChildren bool     `json:"keepChildren,omitempty"`
 }
 
 type ChangesResponse struct {
@@ -183,7 +215,6 @@ func (q *Queue) Push(evs ...Event) {
 	q.mu.Unlock()
 }
 
-// Since returns events after `since`. ok=false means the client needs a full snapshot.
 func (q *Queue) Since(since uint64) (events []Event, latest uint64, ok bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -191,7 +222,7 @@ func (q *Queue) Since(since uint64) (events []Event, latest uint64, ok bool) {
 		return nil, q.seq, false
 	}
 	if len(q.events) > 0 && since < q.events[0].Seq-1 {
-		return nil, q.seq, false // trimmed past what they have
+		return nil, q.seq, false
 	}
 	for _, ev := range q.events {
 		if ev.Seq > since {
@@ -217,71 +248,46 @@ type Classified struct {
 	Syncable     bool
 }
 
-// classify maps a relative forward-slash path to its Roblox location.
-// isDir=true classifies the path as a container (Folder) rather than a file.
-func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
-	var target string
-
-	// 1. Try project root mappings
-	for _, r := range cfg.Roots {
-		if strings.HasPrefix(rel, r.Dir+"/") || rel == r.Dir {
-			target = r.Target
-			break
-		}
-	}
-
-	// 2. Try global package mappings
-	if target == "" {
+// mapPath returns the Roblox target and base instance segments for rel,
+// plus the remaining path below the mapped root.
+func mapPath(cfg ProjectConfig, rel string) (target string, base []string, rest string, ok bool) {
+	if strings.HasPrefix(rel, pkgPrefix) {
+		inner := strings.TrimPrefix(rel, pkgPrefix)
 		for _, p := range cfg.Packages {
-			if strings.HasPrefix(rel, p.PackageName+"/") || rel == p.PackageName {
-				target = p.Target
-				break
+			if inner == p.PackageName || strings.HasPrefix(inner, p.PackageName+"/") {
+				parent, name := splitTarget(p.Target)
+				return parent, []string{name}, strings.TrimPrefix(strings.TrimPrefix(inner, p.PackageName), "/"), true
 			}
 		}
+		return "", nil, "", false
 	}
+	for _, r := range cfg.Roots {
+		if rel == r.Dir || strings.HasPrefix(rel, r.Dir+"/") {
+			return r.Target, nil, strings.TrimPrefix(strings.TrimPrefix(rel, r.Dir), "/"), true
+		}
+	}
+	return "", nil, "", false
+}
 
-	if target == "" {
+func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
+	target, base, rest, ok := mapPath(cfg, rel)
+	if !ok {
 		return Classified{}
 	}
-
-	// Calculate segments relative to the target root
-	var segs []string
-	if strings.Contains(rel, "/") {
-		// Remove the root part (e.g., "shared/" or "vibeonline_razorinput/0.1.0/")
-		var rootPart string
-		for _, r := range cfg.Roots {
-			if strings.HasPrefix(rel, r.Dir+"/") {
-				rootPart = r.Dir + "/"
-				break
-			}
-		}
-		if rootPart == "" {
-			for _, p := range cfg.Packages {
-				if strings.HasPrefix(rel, p.PackageName+"/") {
-					rootPart = p.PackageName + "/"
-					break
-				}
-			}
-		}
-
-		if rootPart != "" {
-			segs = strings.Split(strings.TrimPrefix(rel, rootPart), "/")
-		} else {
-			// Handle the case where rel is exactly the root
-			segs = []string{}
-		}
-	} else {
-		segs = []string{}
+	segs := append([]string{}, base...)
+	if rest != "" {
+		segs = append(segs, strings.Split(rest, "/")...)
 	}
 
 	if isDir {
 		return Classified{Target: target, InstancePath: segs, ClassName: "Folder", Syncable: true}
 	}
-	if len(segs) == 0 {
+	if rest == "" {
 		return Classified{}
 	}
+
 	file := segs[len(segs)-1]
-	parent := segs[:len(segs)-1]
+	parent := append([]string{}, segs[:len(segs)-1]...)
 	ext := strings.ToLower(filepath.Ext(file))
 	stem := strings.TrimSuffix(file, filepath.Ext(file))
 
@@ -301,10 +307,13 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 	case ".txt":
 		class = "StringValue"
 	default:
-		return Classified{} // .rbxm/.rbxmx not supported yet
+		return Classified{}
 	}
 
-	if stem == "init" {
+	if strings.EqualFold(stem, "init") {
+		if len(parent) == 0 {
+			return Classified{} // init directly at a project root has nowhere to go
+		}
 		return Classified{Target: target, InstancePath: parent, ClassName: class, IsInit: true, Syncable: true}
 	}
 	return Classified{Target: target, InstancePath: append(parent, stem), ClassName: class, Syncable: true}
@@ -319,27 +328,33 @@ type Server struct {
 	watcher *fsnotify.Watcher
 
 	mu      sync.Mutex
-	known   map[string]bool // rel path -> isDir
+	known   map[string]bool
 	pending map[string]*time.Timer
 }
 
 func (s *Server) relPath(abs string) (string, bool) {
-	// First check if it's a global package path
-	home, _ := os.UserHomeDir()
-	pkgBase := filepath.Join(home, ".chainlink", "packages")
-	if strings.HasPrefix(abs, pkgBase) {
-		rel, err := filepath.Rel(pkgBase, abs)
-		if err == nil {
-			return filepath.ToSlash(rel), true
+	base := packagesBase()
+	if rel, err := filepath.Rel(base, abs); err == nil && !strings.HasPrefix(rel, "..") {
+		rel = filepath.ToSlash(rel)
+		for _, p := range s.cfg.Packages {
+			if rel == p.PackageName || strings.HasPrefix(rel, p.PackageName+"/") {
+				return pkgPrefix + rel, true
+			}
 		}
+		return "", false
 	}
-
-	// Otherwise, relative to root
 	rel, err := filepath.Rel(s.root, abs)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return "", false
 	}
 	return filepath.ToSlash(rel), true
+}
+
+func (s *Server) absPath(rel string) string {
+	if strings.HasPrefix(rel, pkgPrefix) {
+		return filepath.Join(packagesBase(), filepath.FromSlash(strings.TrimPrefix(rel, pkgPrefix)))
+	}
+	return filepath.Join(s.root, filepath.FromSlash(rel))
 }
 
 func (s *Server) fileEvent(rel string, op string) (Event, bool) {
@@ -348,50 +363,24 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 		return Event{}, false
 	}
 	ev := Event{Op: op, Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: c.ClassName}
-	if op != "DELETE" {
-		var abs string
-		// Use a unified path resolver instead of manually checking slashes
-		home, _ := os.UserHomeDir()
-		pkgBase := filepath.Join(home, ".chainlink", "packages")
-
-		// Check if it's a global package
-		isGlobal := false
-		for _, p := range s.cfg.Packages {
-			if strings.HasPrefix(rel, p.PackageName+"/") || rel == p.PackageName {
-				abs = filepath.Join(pkgBase, rel)
-				isGlobal = true
-				break
-			}
-		}
-
-		if !isGlobal {
-			abs = filepath.Join(s.root, filepath.FromSlash(rel))
-		}
-
-		// Basic path traversal check
-		if !strings.HasPrefix(abs, s.root) && !strings.HasPrefix(abs, pkgBase) {
-			return Event{}, false
-		}
-
-		data, err := os.ReadFile(abs)
-		if err != nil {
-			return Event{}, false
-		}
-		source := string(data)
-		// Wrap JSON as a Luau table return
-		if strings.HasSuffix(rel, ".json") {
-			var parsed any
-			if err := json.Unmarshal([]byte(source), &parsed); err != nil {
-				// Fallback: if JSON is invalid, just prepend return and hope for the best
-				source = fmt.Sprintf("return %s", source)
-			} else {
-				source = fmt.Sprintf("return %s", jsonToLuau(parsed))
-			}
-		}
-		ev.Source = source
-	} else if c.IsInit {
-		ev.KeepChildren = true
+	if op == "DELETE" {
+		ev.KeepChildren = c.IsInit
+		return ev, true
 	}
+	data, err := os.ReadFile(s.absPath(rel))
+	if err != nil {
+		return Event{}, false
+	}
+	source := string(data)
+	if strings.HasSuffix(strings.ToLower(rel), ".json") {
+		var parsed any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			source = "return " + source
+		} else {
+			source = "return " + jsonToLuau(parsed)
+		}
+	}
+	ev.Source = source
 	return ev, true
 }
 
@@ -402,13 +391,13 @@ func jsonToLuau(v any) string {
 		for k, val := range t {
 			pairs = append(pairs, fmt.Sprintf("[%q] = %s", k, jsonToLuau(val)))
 		}
-		return fmt.Sprintf("{%s}", strings.Join(pairs, ", "))
+		return "{" + strings.Join(pairs, ", ") + "}"
 	case []any:
 		var items []string
 		for _, val := range t {
 			items = append(items, jsonToLuau(val))
 		}
-		return fmt.Sprintf("{%s}", strings.Join(items, ", "))
+		return "{" + strings.Join(items, ", ") + "}"
 	case string:
 		return fmt.Sprintf("%q", t)
 	case float64:
@@ -422,55 +411,48 @@ func jsonToLuau(v any) string {
 	}
 }
 
+// walkFiles emits CREATE events for every syncable file under absDir.
+// Reports whether an init file sits directly at the mapped root.
+func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
+	filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, ok := s.relPath(p)
+		if !ok {
+			return nil
+		}
+		if ev, ok := s.fileEvent(rel, "CREATE"); ok {
+			*out = append(*out, ev)
+			if c := classify(s.cfg, rel, false); c.IsInit && len(c.InstancePath) == 1 {
+				rootInit = true
+			}
+		}
+		return nil
+	})
+	return rootInit
+}
+
 func (s *Server) snapshot() []Event {
 	var out []Event
-
-	// 1. Project root snapshot
 	for _, r := range s.cfg.Roots {
-		base := filepath.Join(s.root, r.Dir)
-		filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return nil
-			}
-			rel, ok := s.relPath(p)
-			if !ok {
-				return nil
-			}
-			if ev, ok := s.fileEvent(rel, "CREATE"); ok {
-				out = append(out, ev)
-			}
-			return nil
-		})
+		s.walkFiles(filepath.Join(s.root, r.Dir), &out)
 	}
-
-	// 2. Global packages snapshot
-	home, _ := os.UserHomeDir()
 	for _, p := range s.cfg.Packages {
-		// p.PackageName is "vibeonline_razorinput/0.1.0"
-		pkgRoot := filepath.Join(home, ".chainlink", "packages", p.PackageName)
-		
-		filepath.Walk(pkgRoot, func(pAbs string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
-				return nil
-			}
-			// Path is relative to ~/.chainlink/packages/
-			// e.g. "vibeonline_razorinput/0.1.0/src/init.luau"
-			rel, err := filepath.Rel(filepath.Join(home, ".chainlink", "packages"), pAbs)
-			if err != nil {
-				return nil
-			}
-			rel = filepath.ToSlash(rel)
-			if ev, ok := s.fileEvent(rel, "CREATE"); ok {
-				out = append(out, ev)
-			}
-			return nil
-		})
+		rel := pkgPrefix + p.PackageName
+		if !s.walkFiles(s.absPath(rel), &out) {
+			// No init: the package is a plain Folder.
+			c := classify(s.cfg, rel, true)
+			out = append(out, Event{Op: "CREATE", Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: "Folder"})
+		}
 	}
-
+	// Parents (and init files, which share their folder's depth) before children.
+	sort.SliceStable(out, func(i, j int) bool {
+		return len(out[i].InstancePath) < len(out[j].InstancePath)
+	})
 	return out
 }
 
-// schedule debounces a path; when the timer fires we look at the *actual* state on disk.
 func (s *Server) schedule(abs string) {
 	rel, ok := s.relPath(abs)
 	if !ok {
@@ -487,33 +469,10 @@ func (s *Server) schedule(abs string) {
 func (s *Server) resolve(rel string) {
 	s.mu.Lock()
 	delete(s.pending, rel)
-	wasKnown, wasDir := false, false
-	if d, ok := s.known[rel]; ok {
-		wasKnown, wasDir = true, d
-	}
+	wasDir, wasKnown := s.known[rel]
 	s.mu.Unlock()
 
-	var abs string
-	if strings.Contains(rel, "/") {
-		parts := strings.SplitN(rel, "/", 2)
-		pkgName := parts[0]
-		home, _ := os.UserHomeDir()
-		isGlobal := false
-		for _, p := range s.cfg.Packages {
-			if p.PackageName == pkgName {
-				isGlobal = true
-				break
-			}
-		}
-		if isGlobal {
-			abs = filepath.Join(home, ".chainlink", "packages", pkgName, parts[1])
-		} else {
-			abs = filepath.Join(s.root, filepath.FromSlash(rel))
-		}
-	} else {
-		abs = filepath.Join(s.root, filepath.FromSlash(rel))
-	}
-
+	abs := s.absPath(rel)
 	info, err := os.Stat(abs)
 
 	// --- removed ---
@@ -533,8 +492,7 @@ func (s *Server) resolve(rel string) {
 		s.mu.Unlock()
 
 		if wasDir {
-			c := classify(s.cfg, rel, true)
-			if c.Syncable {
+			if c := classify(s.cfg, rel, true); c.Syncable {
 				s.queue.Push(Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
 				log.Printf("[DELETE] %s/", rel)
 			}
@@ -556,9 +514,8 @@ func (s *Server) resolve(rel string) {
 			return
 		}
 		s.watcher.Add(abs)
-		// Walk contents: new subdirs get watched, files get emitted.
 		filepath.Walk(abs, func(p string, fi os.FileInfo, err error) error {
-			if err != nil {
+			if err != nil || p == abs {
 				return nil
 			}
 			r, ok := s.relPath(p)
@@ -613,48 +570,31 @@ func (s *Server) watchLoop() {
 	}
 }
 
+func (s *Server) primeDir(absDir string) {
+	filepath.Walk(absDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, ok := s.relPath(p)
+		if !ok {
+			return nil
+		}
+		if info.IsDir() {
+			s.watcher.Add(p)
+			s.known[rel] = true
+		} else if c := classify(s.cfg, rel, false); c.Syncable {
+			s.known[rel] = false
+		}
+		return nil
+	})
+}
+
 func (s *Server) primeKnown() {
 	for _, r := range s.cfg.Roots {
-		base := filepath.Join(s.root, r.Dir)
-		filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			rel, ok := s.relPath(p)
-			if !ok {
-				return nil
-			}
-			if info.IsDir() {
-				s.watcher.Add(p)
-				s.known[rel] = true
-			} else if c := classify(s.cfg, rel, false); c.Syncable {
-				s.known[rel] = false
-			}
-			return nil
-		})
+		s.primeDir(filepath.Join(s.root, r.Dir))
 	}
-
-	// Also prime known global packages to avoid them being treated as NEW files if they are modified
-	home, _ := os.UserHomeDir()
-	pkgBase := filepath.Join(home, ".chainlink", "packages")
 	for _, p := range s.cfg.Packages {
-		pkgRoot := filepath.Join(pkgBase, p.PackageName)
-		filepath.Walk(pkgRoot, func(pAbs string, info os.FileInfo, err error) error {
-			if err != nil {
-				return nil
-			}
-			rel, ok := s.relPath(pAbs)
-			if !ok {
-				return nil
-			}
-			if info.IsDir() {
-				s.watcher.Add(pAbs)
-				s.known[rel] = true
-			} else if c := classify(s.cfg, rel, false); c.Syncable {
-				s.known[rel] = false
-			}
-			return nil
-		})
+		s.primeDir(s.absPath(pkgPrefix + p.PackageName))
 	}
 }
 
@@ -720,7 +660,6 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // ---------- Entry point ----------
 
-// serve handles the "chainlink serve" command.
 func serve() error {
 	fmt.Println("Starting ChainLink serve...")
 	cfg := loadConfig()
@@ -731,7 +670,7 @@ func serve() error {
 	}
 
 	for _, r := range cfg.Roots {
-		if _, err := os.Stat(filepath.Join(root, r.Dir)); os.IsNotExist(err) {
+		if !dirExists(filepath.Join(root, r.Dir)) {
 			fmt.Printf("Warning: directory %s/ not found. It will be ignored until created.\n", r.Dir)
 		}
 	}
@@ -750,7 +689,6 @@ func serve() error {
 		known:   map[string]bool{},
 		pending: map[string]*time.Timer{},
 	}
-	// Watch the project root so newly-created root dirs (e.g. prefab/) get picked up.
 	watcher.Add(root)
 	s.primeKnown()
 	go s.watchLoop()
@@ -763,6 +701,19 @@ func serve() error {
 	fmt.Printf("Listening on http://%s  (session %s)\n", addr, s.queue.sessionID)
 	for _, r := range cfg.Roots {
 		fmt.Printf("  %-8s -> %s\n", r.Dir+"/", r.Target)
+	}
+	for _, p := range cfg.Packages {
+		abs := s.absPath(pkgPrefix + p.PackageName)
+		status := "NOT FOUND"
+		if dirExists(abs) {
+			var tmp []Event
+			if s.walkFiles(abs, &tmp) {
+				status = fmt.Sprintf("ModuleScript, %d files", len(tmp))
+			} else {
+				status = fmt.Sprintf("Folder (no init), %d files", len(tmp))
+			}
+		}
+		fmt.Printf("  pkg %s -> %s  [%s]\n", abs, p.Target, status)
 	}
 	fmt.Println("Press Ctrl+C to stop.")
 
