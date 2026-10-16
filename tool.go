@@ -25,11 +25,65 @@ type GitHubAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
+// SetupProjectBin creates symlinks in the current project's .bin directory
+// pointing to the globally installed tools.
+func SetupProjectBin(tools map[string]string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	projectBinDir := "./.bin"
+	if err := os.MkdirAll(projectBinDir, 0755); err != nil {
+		return fmt.Errorf("failed to create project bin directory: %w", err)
+	}
+
+	for name, spec := range tools {
+		parts := strings.Split(spec, "@")
+		if len(parts) != 2 {
+			continue
+		}
+		tag := parts[1]
+
+		globalToolDir := filepath.Join(home, ".chainlink", "tools", name, tag)
+
+		// Find the actual binary inside the global tool directory
+		var binaryPath string
+		err := filepath.Walk(globalToolDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && filepath.Ext(path) == "" {
+				binaryPath = path
+				return filepath.SkipDir // Found the binary, stop walking
+			}
+			return nil
+		})
+
+		if err != nil || binaryPath == "" {
+			return fmt.Errorf("could not find binary for tool %s in %s", name, globalToolDir)
+		}
+
+		symlinkPath := filepath.Join(projectBinDir, name)
+
+		// Remove existing symlink/file if it exists
+		if _, err := os.Lstat(symlinkPath); err == nil {
+			os.Remove(symlinkPath)
+		}
+
+		if err := os.Symlink(binaryPath, symlinkPath); err != nil {
+			return fmt.Errorf("failed to create symlink for %s: %w", name, err)
+		}
+		fmt.Printf("Linked %s -> %s\n", name, binaryPath)
+	}
+	return nil
+}
+
 // InstallToolList installs multiple tools from a map.
 func InstallToolList(tools map[string]string) error {
 	for name, spec := range tools {
 		fmt.Printf("Installing tool %s: %s\n", name, spec)
-		if err := InstallTool(spec); err != nil {
+		if err := InstallTool(name, spec); err != nil {
 			return fmt.Errorf("failed to install tool %s (%s): %w", name, spec, err)
 		}
 	}
@@ -38,7 +92,7 @@ func InstallToolList(tools map[string]string) error {
 
 // InstallTool downloads a tool release from GitHub by tag.
 // Format: "owner/repo@tag" (e.g., "Kampfkarren/selene@0.32.0")
-func InstallTool(toolSpec string) error {
+func InstallTool(toolName, toolSpec string) error {
 	parts := strings.Split(toolSpec, "@")
 	if len(parts) != 2 {
 		return fmt.Errorf("invalid tool format: %s. Expected format 'owner/repo@tag'", toolSpec)
@@ -46,6 +100,25 @@ func InstallTool(toolSpec string) error {
 
 	repo := parts[0] // "Kampfkarren/selene"
 	tag := parts[1]  // "0.32.0"
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	// Check if the tool is already installed (as-is or with 'v' prefix)
+	globalToolDir := filepath.Join(home, ".chainlink", "tools", toolName, tag)
+	if _, err := os.Stat(globalToolDir); err == nil {
+		fmt.Printf("Tool %s version %s is already installed. Skipping.\n", toolName, tag)
+		return nil
+	}
+	if !strings.HasPrefix(tag, "v") {
+		vGlobalToolDir := filepath.Join(home, ".chainlink", "tools", toolName, "v"+tag)
+		if _, err := os.Stat(vGlobalToolDir); err == nil {
+			fmt.Printf("Tool %s version %s (installed as v%s) is already installed. Skipping.\n", toolName, tag, tag)
+			return nil
+		}
+	}
 
 	// GitHub tags often start with 'v', but users might omit it.
 	// We try the tag as-is first, and if that fails with a 404, we try adding 'v'.
@@ -124,7 +197,13 @@ func InstallTool(toolSpec string) error {
 
 	asset := *targetAsset
 
-	binDir := "./bin"
+	home, err = os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	// Store tools in ~/.chainlink/tools/toolName/version
+	binDir := filepath.Join(home, ".chainlink", "tools", toolName, tag)
 	if err := os.MkdirAll(binDir, 0755); err != nil {
 		return fmt.Errorf("failed to create bin directory: %w", err)
 	}

@@ -19,6 +19,14 @@ type ChainLinkConfig struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		if err := InstallChainlink(); err != nil {
+			fmt.Printf("Error installing Chainlink: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	var config ChainLinkConfig
 
 	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {

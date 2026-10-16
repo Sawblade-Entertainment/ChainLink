@@ -95,17 +95,27 @@ func InstallPackage(alias, packageName string) error {
 		return fmt.Errorf("failed to close temp file: %v", err)
 	}
 
-	// Ensure the base packages directory exists
-	if err := os.MkdirAll("packages", os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create packages directory: %v", err)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	// Unzip the package into owner@name folder
-	if err := unzip(tmpFileName, "packages/"+alias); err != nil {
-		return fmt.Errorf("failed to extract package: %v", err)
+	// Global package directory: ~/.chainlink/packages/scope_name/version
+	globalPkgDir := filepath.Join(home, ".chainlink", "packages", scope+"_"+name, version)
+	if _, err := os.Stat(globalPkgDir); err == nil {
+		fmt.Printf("Package %s version %s is already installed globally. Skipping.\n", scopeName, version)
+		return nil
 	}
 
-	fmt.Printf("Successfully installed %s to packages\n", packageName)
+	if err := os.MkdirAll(globalPkgDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create global package directory: %v", err)
+	}
+
+	if err := unzip(tmpFileName, globalPkgDir); err != nil {
+		return fmt.Errorf("failed to extract package globally: %v", err)
+	}
+
+	fmt.Printf("Successfully installed %s globally to %s\n", packageName, globalPkgDir)
 	return nil
 }
 
