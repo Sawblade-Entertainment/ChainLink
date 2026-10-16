@@ -51,13 +51,23 @@ func main() {
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: chainlink <command> [args]")
-		fmt.Println("Commands: install, tool, pack")
+		printUsage()
 		os.Exit(0)
 	}
 
 	cmd := os.Args[1]
 	switch cmd {
+	case "help":
+		printUsage()
+	case "add":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: chainlink add <spec> [--tool]")
+			os.Exit(1)
+		}
+		if err := handleAdd(os.Args[2:]); err != nil {
+			fmt.Printf("Error adding: %v\n", err)
+			os.Exit(1)
+		}
 	case "install":
 		if len(os.Args) > 2 {
 			fmt.Println("Error: 'chainlink install' does not take arguments.")
@@ -67,139 +77,41 @@ func main() {
 			fmt.Printf("Error installing: %v\n", err)
 			os.Exit(1)
 		}
-	case "tool":
-		handleToolCommand()
-	case "pack":
-		handlePackCommand()
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
-		fmt.Println("Usage: chainlink <command> [args]")
-		fmt.Println("Commands: install, tool, pack")
+		printUsage()
 		os.Exit(1)
 	}
 }
 
-func installAll() error {
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		return fmt.Errorf("could not find chain.toml: %w", err)
-	}
-
-	fmt.Println("Installing packages...")
-	if err := installPackagesOnly(); err != nil {
-		return fmt.Errorf("package installation failed: %w", err)
-	}
-
-	fmt.Println("Installing tools...")
-	if err := installToolsOnly(); err != nil {
-		return fmt.Errorf("tool installation failed: %w", err)
-	}
-
-	return nil
+func printUsage() {
+	fmt.Println("Usage: chainlink <command> [args]")
+	fmt.Println("Commands: install, add, help")
 }
 
-func handleToolCommand() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: chainlink tool <add|remove|list|install> [name@version]")
-		os.Exit(1)
+func handleAdd(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("no specification provided")
 	}
 
-	subCmd := os.Args[2]
-	switch subCmd {
-	case "add":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: chainlink tool add <name@spec>")
-			os.Exit(1)
+	spec := args[0]
+	isTool := false
+	isPackage := false
+	for _, arg := range args[1:] {
+		if arg == "--tool" {
+			isTool = true
+		} else if arg == "--package" {
+			isPackage = true
 		}
-		if err := addTool(os.Args[3]); err != nil {
-			fmt.Printf("Error adding tool: %v\n", err)
-			os.Exit(1)
-		}
-	case "remove":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: chainlink tool remove <name>")
-			os.Exit(1)
-		}
-		if err := removeTool(os.Args[3]); err != nil {
-			fmt.Printf("Error removing tool: %v\n", err)
-			os.Exit(1)
-		}
-	case "list":
-		listTools()
-	case "install":
-		if err := installToolsOnly(); err != nil {
-			fmt.Printf("Error installing tools: %v\n", err)
-			os.Exit(1)
-		}
-	default:
-		fmt.Printf("Unknown tool command: %s\n", subCmd)
-		fmt.Println("Usage: chainlink tool <add|remove|list|install> [name@version]")
-		os.Exit(1)
-	}
-}
-
-func handlePackCommand() {
-	if len(os.Args) < 3 {
-		fmt.Println("Usage: chainlink pack <add|remove|list|install> [name@version]")
-		os.Exit(1)
 	}
 
-	subCmd := os.Args[2]
-	switch subCmd {
-	case "add":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: chainlink pack add <name@spec>")
-			os.Exit(1)
-		}
-		if err := addPackage(os.Args[3]); err != nil {
-			fmt.Printf("Error adding package: %v\n", err)
-			os.Exit(1)
-		}
-	case "remove":
-		if len(os.Args) < 4 {
-			fmt.Println("Usage: chainlink pack remove <name>")
-			os.Exit(1)
-		}
-		if err := removePackage(os.Args[3]); err != nil {
-			fmt.Printf("Error removing package: %v\n", err)
-			os.Exit(1)
-		}
-	case "list":
-		listPackages()
-	case "install":
-		if err := installPackagesOnly(); err != nil {
-			fmt.Printf("Error installing packages: %v\n", err)
-			os.Exit(1)
-		}
-	default:
-		fmt.Printf("Unknown pack command: %s\n", subCmd)
-		fmt.Println("Usage: chainlink pack <add|remove|list|install> [name@version]")
-		os.Exit(1)
-	}
-}
-
-func addTool(spec string) error {
-	// Expects name@owner/repo@tag or just owner/repo@tag
-	// The current system uses the tool name as the key in chain.toml
-	parts := strings.Split(spec, "@")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid tool spec. Expected name@owner/repo@tag")
+	if isTool && isPackage {
+		return fmt.Errorf("cannot specify both --tool and --package")
 	}
 
-	// The original logic in main.go used config.Tools[toolName] = spec
-	// where spec was "owner/repo@tag".
-	// We need to determine the "name" of the tool.
-	// For now, let's assume format: name:owner/repo@tag
-	var name, toolSpec string
-	if strings.Contains(spec, ":") {
-		sParts := strings.SplitN(spec, ":", 2)
-		name = sParts[0]
-		toolSpec = sParts[1]
-	} else {
-		// Fallback: use the repo name as the tool name
-		repoParts := strings.Split(parts[0], "/")
-		name = repoParts[len(repoParts)-1]
-		toolSpec = spec
+	// Heuristic: assume tool if it contains capital letters, otherwise package
+	if !isTool && !isPackage {
+		isTool = containsUppercase(spec)
 	}
 
 	var config ChainLinkConfig
@@ -209,94 +121,64 @@ func addTool(spec string) error {
 		config.Packages = make(map[string]string)
 	}
 
-	config.Tools[name] = toolSpec
-	return writeConfig(&config)
-}
-
-func removeTool(name string) error {
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		return fmt.Errorf("could not find chain.toml: %w", err)
-	}
-	delete(config.Tools, name)
-	return writeConfig(&config)
-}
-
-func listTools() {
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		fmt.Println("No chain.toml found.")
-		return
-	}
-	fmt.Println("Installed Tools:")
-	for name, spec := range config.Tools {
-		fmt.Printf("- %s: %s\n", name, spec)
-	}
-}
-
-func installToolsOnly() error {
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		return fmt.Errorf("could not find chain.toml: %w", err)
-	}
-	if err := InstallToolList(config.Tools); err != nil {
-		return err
-	}
-	return SetupProjectBin(config.Tools)
-}
-
-func addPackage(spec string) error {
-	// Format: alias:scope/name@version
-	var alias, pkgSpec string
-	if strings.Contains(spec, ":") {
-		sParts := strings.SplitN(spec, ":", 2)
-		alias = sParts[0]
-		pkgSpec = sParts[1]
-	} else {
-		// Fallback: use scope/name as alias
+	if isTool {
+		// Tool logic: derive name from owner/repo@tag
 		parts := strings.Split(spec, "@")
-		alias = parts[0]
-		pkgSpec = spec
+		if len(parts) < 2 {
+			return fmt.Errorf("invalid tool spec. Expected format 'owner/repo@tag'")
+		}
+		repo := parts[0]
+		repoParts := strings.Split(repo, "/")
+		name := repoParts[len(repoParts)-1]
+		config.Tools[name] = spec
+	} else {
+		// Package logic: derive name from scope/name@version
+		parts := strings.Split(spec, "@")
+		if len(parts) < 2 {
+			return fmt.Errorf("invalid package spec. Expected format 'scope/name@version'")
+		}
+		scopeName := parts[0]
+		scopeParts := strings.Split(scopeName, "/")
+		name := scopeParts[len(scopeParts)-1]
+		config.Packages[name] = spec
 	}
 
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		config.Tools = make(map[string]string)
-		config.Packages = make(map[string]string)
-	}
-
-	config.Packages[alias] = pkgSpec
 	return writeConfig(&config)
 }
 
-func removePackage(alias string) error {
+func containsUppercase(s string) bool {
+	for _, r := range s {
+		if (r >= 'A' && r <= 'Z') || (r >= 'À' && r <= 'Þ') || (r >= 'ŕ' && r <= 'ž') {
+			return true
+		}
+	}
+	return false
+}
+
+func installAll() error {
 	var config ChainLinkConfig
 	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
 		return fmt.Errorf("could not find chain.toml: %w", err)
 	}
-	delete(config.Packages, alias)
-	return writeConfig(&config)
+
+	fmt.Println("Installing packages...")
+	if err := InstallPackageList(config.Packages); err != nil {
+		return fmt.Errorf("package installation failed: %w", err)
+	}
+
+	fmt.Println("Installing tools...")
+	if err := InstallToolList(config.Tools); err != nil {
+		return fmt.Errorf("tool installation failed: %w", err)
+	}
+
+	if err := SetupProjectBin(config.Tools); err != nil {
+		return fmt.Errorf("bin setup failed: %w", err)
+	}
+
+	return nil
 }
 
-func listPackages() {
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		fmt.Println("No chain.toml found.")
-		return
-	}
-	fmt.Println("Installed Packages:")
-	for alias, spec := range config.Packages {
-		fmt.Printf("- %s: %s\n", alias, spec)
-	}
-}
-
-func installPackagesOnly() error {
-	var config ChainLinkConfig
-	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
-		return fmt.Errorf("could not find chain.toml: %w", err)
-	}
-	return InstallPackageList(config.Packages)
-}
+// Remove the following functions entirely
 
 func writeConfig(config *ChainLinkConfig) error {
 	f, err := os.Create("chain.toml")
