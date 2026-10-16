@@ -1,13 +1,24 @@
 package main
 
 import (
+	"archive/zip"
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"errors"
+	"flag"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/term"
 )
 
 type PackageInfo struct {
@@ -102,6 +113,16 @@ func main() {
 			fmt.Printf("Error installing plugin: %v\n", err)
 			os.Exit(1)
 		}
+	case "login":
+		if err := handleLogin(os.Args[2:]); err != nil {
+			fmt.Printf("Error logging in: %v\n", err)
+			os.Exit(1)
+		}
+	case "publish":
+		if err := handlePublish(); err != nil {
+			fmt.Printf("Error publishing: %v\n", err)
+			os.Exit(1)
+		}
 	case "serve":
 
 		if err := serve(); err != nil {
@@ -117,7 +138,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: init, install, plugin, add, remove, serve, help")
+	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, help")
 }
 
 func handleInit() error {
@@ -273,6 +294,484 @@ func writeConfig(config *ChainLinkConfig) error {
 	}
 	defer f.Close()
 	return toml.NewEncoder(f).Encode(config)
+}
+
+type AuthStore struct {
+	Tokens map[string]string `toml:"tokens"`
+}
+
+func authPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(home, ".chainlink", "auth.toml"), nil
+}
+
+func loadAuthStore() (*AuthStore, error) {
+	path, err := authPath()
+	if err != nil {
+		return nil, err
+	}
+	store := &AuthStore{Tokens: map[string]string{}}
+
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return store, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	if err := toml.Unmarshal(data, store); err != nil {
+		return nil, fmt.Errorf("malformed auth config at %s: %w", path, err)
+	}
+	if store.Tokens == nil {
+		store.Tokens = map[string]string{}
+	}
+	return store, nil
+}
+
+func (s *AuthStore) save() error {
+	path, err := authPath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("failed to create auth directory: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(s); err != nil {
+		return fmt.Errorf("failed to encode auth store: %w", err)
+	}
+	return os.WriteFile(path, buf.Bytes(), 0600)
+}
+
+func setToken(api, token string) error {
+	key, err := normalizeURL(api)
+	if err != nil {
+		return err
+	}
+	store, err := loadAuthStore()
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		delete(store.Tokens, key)
+	} else {
+		store.Tokens[key] = token
+	}
+	return store.save()
+}
+
+func getToken(api string) (string, error) {
+	key, err := normalizeURL(api)
+	if err != nil {
+		return "", err
+	}
+	store, err := loadAuthStore()
+	if err != nil {
+		return "", err
+	}
+	if t, ok := store.Tokens[key]; ok {
+		return t, nil
+	}
+	if t, ok := store.Tokens[strings.TrimSuffix(key, "/")]; ok {
+		return t, nil
+	}
+	return "", fmt.Errorf("no token found for %s", key)
+}
+
+func normalizeURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", fmt.Errorf("invalid URL %q", raw)
+	}
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	return u.String(), nil
+}
+
+type IndexConfig struct {
+	API           string   `json:"api"`
+	GithubOAuthID string   `json:"github_oauth_id,omitempty"`
+	FallbackRegs  []string `json:"fallback_registries,omitempty"`
+}
+
+func fetchIndexConfig(registry string) (*IndexConfig, error) {
+	u, err := url.Parse(strings.TrimSuffix(registry, ".git"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid registry URL %q: %w", registry, err)
+	}
+	if u.Host != "github.com" {
+		return nil, fmt.Errorf("only GitHub-hosted registries are supported (got %s); use --api", registry)
+	}
+	repoPath := strings.Trim(u.Path, "/")
+	rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/HEAD/config.json", repoPath)
+
+	resp, err := http.Get(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch registry config: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch registry config from %s: %s", rawURL, resp.Status)
+	}
+
+	var cfg IndexConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("malformed registry config: %w", err)
+	}
+	if cfg.API == "" {
+		return nil, fmt.Errorf("registry config has no 'api' field")
+	}
+	return &cfg, nil
+}
+
+func projectRegistry(projectPath string) string {
+	var m struct {
+		Package struct {
+			Registry string `toml:"registry"`
+		} `toml:"package"`
+	}
+	for _, name := range []string{"chain.toml", "wally.toml"} {
+		if _, err := toml.DecodeFile(filepath.Join(projectPath, name), &m); err == nil && m.Package.Registry != "" {
+			return m.Package.Registry
+		}
+	}
+	return "https://github.com/UpliftGames/wally-index"
+}
+
+func handleLogin(args []string) error {
+	fs := flag.NewFlagSet("login", flag.ContinueOnError)
+	projectPath := fs.String("project-path", ".", "path to the project")
+	api := fs.String("api", "", "API URL to store the token for")
+	token := fs.String("token", "", "token to store (skips interactive login)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if *token != "" && *api != "" {
+		if err := setToken(*api, *token); err != nil {
+			return err
+		}
+		fmt.Println("Token saved.")
+		return nil
+	}
+
+	var cfg *IndexConfig
+	if *api != "" {
+		cfg = &IndexConfig{API: *api}
+	} else {
+		var err error
+		cfg, err = fetchIndexConfig(projectRegistry(*projectPath))
+		if err != nil {
+			return err
+		}
+	}
+
+	if *token != "" {
+		if err := setToken(cfg.API, *token); err != nil {
+			return err
+		}
+		fmt.Println("Token saved.")
+		return nil
+	}
+
+	if cfg.GithubOAuthID == "" {
+		return promptAPIKey(cfg.API)
+	}
+	return promptGithubAuth(cfg.API, cfg.GithubOAuthID)
+}
+
+func promptAPIKey(api string) error {
+	fmt.Printf("Wally requires an API key to publish to %s.\n", api)
+	fmt.Print("Enter an API key: ")
+
+	var key string
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return fmt.Errorf("failed to read API key: %w", err)
+		}
+		key = string(b)
+	} else {
+		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("failed to read API key: %w", err)
+		}
+		key = line
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return errors.New("API key cannot be empty")
+	}
+	if err := setToken(api, key); err != nil {
+		return err
+	}
+	fmt.Println("API key saved.")
+	return nil
+}
+
+type deviceCodeResponse struct {
+	DeviceCode      string `json:"device_code"`
+	UserCode        string `json:"user_code"`
+	VerificationURI string `json:"verification_uri"`
+	ExpiresIn       int    `json:"expires_in"`
+	Interval        int    `json:"interval"`
+}
+
+type accessTokenResponse struct {
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"token_type"`
+	Scope            string `json:"scope"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+	Interval         int    `json:"interval"`
+}
+
+func postJSON(client *http.Client, endpoint string, body any, out any) error {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("%s: %s", resp.Status, string(data))
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func promptGithubAuth(api, clientID string) error {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	var dc deviceCodeResponse
+	err := postJSON(client, "https://github.com/login/device/code", map[string]string{
+		"client_id": clientID,
+		"scope":     "read:user read:org",
+	}, &dc)
+	if err != nil {
+		return fmt.Errorf("failed to start GitHub device flow: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("Go to %s\n", dc.VerificationURI)
+	fmt.Printf("And enter the code: %s\n", dc.UserCode)
+	fmt.Println()
+	fmt.Println("Awaiting authorization...")
+
+	interval := time.Duration(dc.Interval) * time.Second
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	deadline := time.Now().Add(time.Duration(dc.ExpiresIn) * time.Second)
+
+	for {
+		time.Sleep(interval)
+		if dc.ExpiresIn > 0 && time.Now().After(deadline) {
+			return errors.New("device code expired, please try again")
+		}
+
+		var tr accessTokenResponse
+		err := postJSON(client, "https://github.com/login/oauth/access_token", map[string]string{
+			"client_id":   clientID,
+			"device_code": dc.DeviceCode,
+			"grant_type":  "urn:ietf:params:oauth:grant-type:device_code",
+		}, &tr)
+		if err != nil {
+			return fmt.Errorf("failed to poll for access token: %w", err)
+		}
+
+		switch tr.Error {
+		case "":
+			if tr.AccessToken == "" {
+				return errors.New("GitHub returned an empty access token")
+			}
+			if err := setToken(api, tr.AccessToken); err != nil {
+				return err
+			}
+			fmt.Println("Authorization successful!")
+			return nil
+		case "authorization_pending":
+			continue
+		case "slow_down":
+			if tr.Interval > 0 {
+				interval = time.Duration(tr.Interval) * time.Second
+			} else {
+				interval += 5 * time.Second
+			}
+		case "expired_token":
+			return errors.New("device code expired, please try again")
+		case "access_denied":
+			return errors.New("authorization was cancelled")
+		default:
+			return fmt.Errorf("GitHub auth error: %s (%s)", tr.Error, tr.ErrorDescription)
+		}
+	}
+}
+
+func handlePublish() error {
+	var config ChainLinkConfig
+	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
+		return fmt.Errorf("could not find chain.toml: %w", err)
+	}
+
+	if config.Package.Name == "" || config.Package.Version == "" {
+		return fmt.Errorf("package name and version must be defined in chain.toml for publishing")
+	}
+
+	fmt.Printf("Preparing to publish %s version %s...\n", config.Package.Name, config.Package.Version)
+
+	tmpDir, err := os.MkdirTemp("", "chainlink-publish-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	if err := copyDir("src", filepath.Join(tmpDir, "src")); err != nil {
+		fmt.Println("Warning: src directory not found, skipping.")
+	}
+
+	if err := copyDir("packages", filepath.Join(tmpDir, "packages")); err != nil {
+		fmt.Println("Warning: packages directory not found, skipping.")
+	}
+
+	// Fetch the registry from the project's config to include it in the manifest
+	registry := projectRegistry(".")
+
+	wallyToml := fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"%s\"\nregistry = \"%s\"\nrealm = \"shared\"\n", config.Package.Name, config.Package.Version, registry)
+	if err := os.WriteFile(filepath.Join(tmpDir, "wally.toml"), []byte(wallyToml), 0644); err != nil {
+		return fmt.Errorf("failed to create wally.toml: %w", err)
+	}
+
+	zipPath := tmpDir + ".zip"
+	if err := createZip(tmpDir, zipPath); err != nil {
+		return fmt.Errorf("failed to create zip: %w", err)
+	}
+	defer os.Remove(zipPath)
+
+	fmt.Println("Uploading to Wally registry...")
+
+	zipData, err := os.ReadFile(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to read zip for upload: %w", err)
+	}
+
+	if len(zipData) > 2*1024*1024 {
+		return fmt.Errorf("package size exceeds 2MB. Reduce package size and try again")
+	}
+
+	api := "https://api.wally.run"
+	cfg, err := fetchIndexConfig(projectRegistry("."))
+	if err == nil {
+		api = cfg.API
+	}
+
+	token, err := getToken(api)
+	if err != nil {
+		return fmt.Errorf("authentication error: %w. Please run 'chainlink login'", err)
+	}
+
+	publishURL := strings.TrimSuffix(api, "/") + "/v1/publish"
+
+	req, err := http.NewRequest("POST", publishURL, bytes.NewReader(zipData))
+	if err != nil {
+		return fmt.Errorf("failed to create upload request: %w", err)
+	}
+
+	req.Header.Set("accept", "application/json")
+	req.Header.Set("Wally-Version", "0.3.2")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute upload request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		return fmt.Errorf("version already exists")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to publish package: %s\n%s", resp.Status, string(respBody))
+	}
+
+	fmt.Println("Package published successfully!")
+	return nil
+}
+
+func copyDir(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode())
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, info.Mode())
+	})
+}
+
+func createZip(source, target string) error {
+	zipFile, err := os.Create(target)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	archive := zip.NewWriter(zipFile)
+	defer archive.Close()
+
+	return filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+
+		rel, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+
+		f, err := archive.Create(rel)
+		if err != nil {
+			return err
+		}
+
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		_, err = io.Copy(f, srcFile)
+		return err
+	})
 }
 
 func proxyToTool(toolName string) error {

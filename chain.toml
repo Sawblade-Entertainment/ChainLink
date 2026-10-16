@@ -1,0 +1,9 @@
+[Package]
+  Name = "vibeonline/razorinput"
+  Description = "Oversimplifying input handlers"
+  Version = "0.1.0"
+  License = "MIT"
+
+[Tools]
+
+[Packages]
