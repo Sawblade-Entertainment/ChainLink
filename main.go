@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/BurntSushi/toml"
 )
 
@@ -18,7 +21,18 @@ type ChainLinkConfig struct {
 func main() {
 	var config ChainLinkConfig
 
-	toml.DecodeFile("chain.toml", &config)
+	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
+		fmt.Printf("Error decoding config: %v\n", err)
+		os.Exit(1)
+	}
 
-	InstallPackageList(config.Packages)
+	if err := InstallToolList(config.Tools); err != nil {
+		fmt.Printf("Error installing tools: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := InstallPackageList(config.Packages); err != nil {
+		fmt.Printf("Error installing packages: %v\n", err)
+		os.Exit(1)
+	}
 }
