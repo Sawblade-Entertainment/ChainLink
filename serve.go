@@ -228,7 +228,7 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 	// If it's a JSON file converted to a ModuleScript, we need to wrap the content
 	// so it's valid Luau: return { ... }
 	if ext == ".json" {
-		// We handle the actual wrapping in fileEvent or a helper. 
+		// We handle the actual wrapping in fileEvent or a helper.
 		// For now, we mark it as a ModuleScript.
 	}
 
@@ -270,11 +270,49 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 		if err != nil {
 			return Event{}, false
 		}
-		ev.Source = string(data)
+		source := string(data)
+		// Wrap JSON as a Luau table return
+		if strings.HasSuffix(rel, ".json") {
+			var parsed any
+			if err := json.Unmarshal([]byte(source), &parsed); err != nil {
+				// Fallback: if JSON is invalid, just prepend return and hope for the best
+				source = fmt.Sprintf("return %s", source)
+			} else {
+				source = fmt.Sprintf("return %s", jsonToLuau(parsed))
+			}
+		}
+		ev.Source = source
 	} else if c.IsInit {
 		ev.KeepChildren = true
 	}
 	return ev, true
+}
+
+func jsonToLuau(v any) string {
+	switch t := v.(type) {
+	case map[string]any:
+		var pairs []string
+		for k, val := range t {
+			pairs = append(pairs, fmt.Sprintf("[%q] = %s", k, jsonToLuau(val)))
+		}
+		return fmt.Sprintf("{%s}", strings.Join(pairs, ", "))
+	case []any:
+		var items []string
+		for _, val := range t {
+			items = append(items, jsonToLuau(val))
+		}
+		return fmt.Sprintf("{%s}", strings.Join(items, ", "))
+	case string:
+		return fmt.Sprintf("%q", t)
+	case float64:
+		return fmt.Sprintf("%g", t)
+	case bool:
+		return fmt.Sprintf("%t", t)
+	case nil:
+		return "nil"
+	default:
+		return fmt.Sprintf("%v", t)
+	}
 }
 
 // snapshot walks every root and returns CREATE events for all syncable files.
