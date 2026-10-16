@@ -243,6 +243,28 @@ func InstallTool(toolName, toolSpec string) error {
 		return fmt.Errorf("failed to make binaries executable: %w", err)
 	}
 
+	// Add symlink to global bin
+	globalBinDir := filepath.Join(home, ".chainlink", "bin")
+	if err := os.MkdirAll(globalBinDir, 0755); err != nil {
+		return fmt.Errorf("failed to create global bin directory: %w", err)
+	}
+
+	symlinkPath := filepath.Join(globalBinDir, toolName)
+	if _, err := os.Lstat(symlinkPath); err == nil {
+		os.Remove(symlinkPath)
+	}
+
+	// The symlink points to the chainlink binary itself
+	// We assume the chainlink binary is already installed or we'll use the current executable path
+	chainlinkExe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	if err := os.Symlink(chainlinkExe, symlinkPath); err != nil {
+		return fmt.Errorf("failed to create global symlink for %s: %w", toolName, err)
+	}
+
 	return nil
 }
 
