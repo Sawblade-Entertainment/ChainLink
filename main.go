@@ -65,6 +65,11 @@ func main() {
 	switch cmd {
 	case "help":
 		printUsage()
+	case "init":
+		if err := handleInit(); err != nil {
+			fmt.Printf("Error initializing: %v\n", err)
+			os.Exit(1)
+		}
 	case "add":
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: chainlink add <spec> [--tool]")
@@ -112,7 +117,32 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: install, plugin, add, remove, serve, help")
+	fmt.Println("Commands: init, install, plugin, add, remove, serve, help")
+}
+
+func handleInit() error {
+	// 1. Git initialization
+	if _, err := os.Stat(".git"); os.IsNotExist(err) {
+		fmt.Println("Initializing git repository...")
+		if err := exec.Command("git", "init").Run(); err != nil {
+			return fmt.Errorf("failed to run git init: %w", err)
+		}
+	} else {
+		fmt.Println("Git repository already exists.")
+	}
+
+	// 2. Create chain.toml
+	if _, err := os.Stat("chain.toml"); err == nil {
+		return fmt.Errorf("chain.toml already exists")
+	}
+
+	fmt.Println("Creating chain.toml...")
+	config := ChainLinkConfig{
+		Tools:    make(map[string]string),
+		Packages: make(map[string]string),
+	}
+
+	return writeConfig(&config)
 }
 
 func handleRemove(name string) error {
