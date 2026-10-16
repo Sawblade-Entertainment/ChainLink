@@ -92,7 +92,13 @@ func main() {
 			fmt.Printf("Error installing: %v\n", err)
 			os.Exit(1)
 		}
+	case "plugin":
+		if err := installPlugin(); err != nil {
+			fmt.Printf("Error installing plugin: %v\n", err)
+			os.Exit(1)
+		}
 	case "serve":
+
 		if err := serve(); err != nil {
 			fmt.Printf("Error serving: %v\n", err)
 			os.Exit(1)
@@ -106,7 +112,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: install, add, remove, serve, help")
+	fmt.Println("Commands: install, plugin, add, remove, serve, help")
 }
 
 func handleRemove(name string) error {

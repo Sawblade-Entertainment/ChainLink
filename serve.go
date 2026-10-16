@@ -220,12 +220,11 @@ type Classified struct {
 // classify maps a relative forward-slash path to its Roblox location.
 // isDir=true classifies the path as a container (Folder) rather than a file.
 func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
-	parts := strings.Split(rel, "/")
 	var target string
 
 	// 1. Try project root mappings
 	for _, r := range cfg.Roots {
-		if parts[0] == r.Dir {
+		if strings.HasPrefix(rel, r.Dir+"/") || rel == r.Dir {
 			target = r.Target
 			break
 		}
@@ -234,7 +233,7 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 	// 2. Try global package mappings
 	if target == "" {
 		for _, p := range cfg.Packages {
-			if parts[0] == p.PackageName {
+			if strings.HasPrefix(rel, p.PackageName+"/") || rel == p.PackageName {
 				target = p.Target
 				break
 			}
@@ -244,7 +243,37 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 	if target == "" {
 		return Classified{}
 	}
-	segs := parts[1:]
+
+	// Calculate segments relative to the target root
+	var segs []string
+	if strings.Contains(rel, "/") {
+		// Remove the root part (e.g., "shared/" or "vibeonline_razorinput/0.1.0/")
+		var rootPart string
+		for _, r := range cfg.Roots {
+			if strings.HasPrefix(rel, r.Dir+"/") {
+				rootPart = r.Dir + "/"
+				break
+			}
+		}
+		if rootPart == "" {
+			for _, p := range cfg.Packages {
+				if strings.HasPrefix(rel, p.PackageName+"/") {
+					rootPart = p.PackageName + "/"
+					break
+				}
+			}
+		}
+
+		if rootPart != "" {
+			segs = strings.Split(strings.TrimPrefix(rel, rootPart), "/")
+		} else {
+			// Handle the case where rel is exactly the root
+			segs = []string{}
+		}
+	} else {
+		segs = []string{}
+	}
+
 	if isDir {
 		return Classified{Target: target, InstancePath: segs, ClassName: "Folder", Syncable: true}
 	}
@@ -275,13 +304,6 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 		return Classified{} // .rbxm/.rbxmx not supported yet
 	}
 
-	// If it's a JSON file converted to a ModuleScript, we need to wrap the content
-	// so it's valid Luau: return { ... }
-	if ext == ".json" {
-		// We handle the actual wrapping in fileEvent or a helper.
-		// For now, we mark it as a ModuleScript.
-	}
-
 	if stem == "init" {
 		return Classified{Target: target, InstancePath: parent, ClassName: class, IsInit: true, Syncable: true}
 	}
@@ -302,6 +324,17 @@ type Server struct {
 }
 
 func (s *Server) relPath(abs string) (string, bool) {
+	// First check if it's a global package path
+	home, _ := os.UserHomeDir()
+	pkgBase := filepath.Join(home, ".chainlink", "packages")
+	if strings.HasPrefix(abs, pkgBase) {
+		rel, err := filepath.Rel(pkgBase, abs)
+		if err == nil {
+			return filepath.ToSlash(rel), true
+		}
+	}
+
+	// Otherwise, relative to root
 	rel, err := filepath.Rel(s.root, abs)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return "", false
@@ -419,25 +452,21 @@ func (s *Server) snapshot() []Event {
 	// 2. Global packages snapshot
 	home, _ := os.UserHomeDir()
 	for _, p := range s.cfg.Packages {
-		// Package directories are stored as "user_package/version"
-		// We need to find the actual folder in ~/.chainlink/packages/
+		// p.PackageName is "vibeonline_razorinput/0.1.0"
 		pkgRoot := filepath.Join(home, ".chainlink", "packages", p.PackageName)
-
-		// If p.PackageName is just the name, we might need to look for a directory
-		// that starts with that name and contains a version.
-		// However, usually, we map the specific version directory.
-
+		
 		filepath.Walk(pkgRoot, func(pAbs string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return nil
 			}
-			rel, err := filepath.Rel(pkgRoot, pAbs)
+			// Path is relative to ~/.chainlink/packages/
+			// e.g. "vibeonline_razorinput/0.1.0/src/init.luau"
+			rel, err := filepath.Rel(filepath.Join(home, ".chainlink", "packages"), pAbs)
 			if err != nil {
 				return nil
 			}
 			rel = filepath.ToSlash(rel)
-			fullRel := p.PackageName + "/" + rel
-			if ev, ok := s.fileEvent(fullRel, "CREATE"); ok {
+			if ev, ok := s.fileEvent(rel, "CREATE"); ok {
 				out = append(out, ev)
 			}
 			return nil
@@ -538,7 +567,10 @@ func (s *Server) resolve(rel string) {
 			if err != nil {
 				return nil
 			}
-			r, _ := s.relPath(p)
+			r, ok := s.relPath(p)
+			if !ok {
+				return nil
+			}
 			if fi.IsDir() {
 				s.watcher.Add(p)
 				s.mu.Lock()
