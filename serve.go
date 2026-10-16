@@ -893,7 +893,7 @@ func serve() error {
 
 	for _, r := range cfg.Roots {
 		if !dirExists(filepath.Join(root, r.Dir)) {
-			fmt.Printf("Warning: directory %s/ not found. It will be ignored until created.\n", r.Dir)
+			log.Printf("Warning: directory %s/ not found. It will be ignored until created.", r.Dir)
 		}
 	}
 
@@ -923,9 +923,9 @@ func serve() error {
 	mux.HandleFunc("/changes", s.auth(s.handleChanges))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
-	fmt.Printf("Listening on http://%s  (session %s)\n", addr, s.queue.sessionID)
+	log.Printf("Listening on http://%s  (session %s)", addr, s.queue.sessionID)
 	for _, r := range cfg.Roots {
-		fmt.Printf("  %-8s -> %s\n", r.Dir+"/", r.Target)
+		log.Printf("  %-8s -> %s", r.Dir+"/", r.Target)
 	}
 	for _, p := range cfg.Packages {
 		abs := s.absPath(pkgPrefix + p.PackageName)
@@ -938,10 +938,10 @@ func serve() error {
 				status = fmt.Sprintf("Folder (no init), %d files", len(tmp))
 			}
 		}
-		fmt.Printf("  pkg %s -> %s  [%s]\n", abs, p.Target, status)
+		log.Printf("  pkg %s -> %s  [%s]", abs, p.Target, status)
 	}
-	fmt.Println("Watching chain.toml and ~/.chainlink/packages for package changes.")
-	fmt.Println("Press Ctrl+C to stop.")
+	log.Println("Watching chain.toml and ~/.chainlink/packages for package changes.")
+	log.Println("Press Ctrl+C to stop.")
 
 	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return srv.ListenAndServe()

@@ -83,7 +83,6 @@ local function logLine(msg: string, color: Color3?)
 		end
 	end
 	logFrame.CanvasPosition = Vector2.new(0, math.huge)
-	print("[ChainLink] " .. msg)
 end
 
 local function setStatus(connected: boolean, text: string)
