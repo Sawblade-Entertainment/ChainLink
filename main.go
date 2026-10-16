@@ -68,6 +68,15 @@ func main() {
 			fmt.Printf("Error adding: %v\n", err)
 			os.Exit(1)
 		}
+	case "remove":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: chainlink remove <name>")
+			os.Exit(1)
+		}
+		if err := handleRemove(os.Args[2]); err != nil {
+			fmt.Printf("Error removing: %v\n", err)
+			os.Exit(1)
+		}
 	case "install":
 		if len(os.Args) > 2 {
 			fmt.Println("Error: 'chainlink install' does not take arguments.")
@@ -86,7 +95,41 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: install, add, help")
+	fmt.Println("Commands: install, add, remove, help")
+}
+
+func handleRemove(name string) error {
+	var config ChainLinkConfig
+	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
+		return fmt.Errorf("could not find chain.toml: %w", err)
+	}
+
+	// Check tools first (case-insensitive)
+	found := false
+	for k := range config.Tools {
+		if strings.EqualFold(k, name) {
+			delete(config.Tools, k)
+			found = true
+			break
+		}
+	}
+
+	// Check packages (case-insensitive)
+	if !found {
+		for k := range config.Packages {
+			if strings.EqualFold(k, name) {
+				delete(config.Packages, k)
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("item %s not found in tools or packages", name)
+	}
+
+	return writeConfig(&config)
 }
 
 func handleAdd(args []string) error {
@@ -169,10 +212,6 @@ func installAll() error {
 	fmt.Println("Installing tools...")
 	if err := InstallToolList(config.Tools); err != nil {
 		return fmt.Errorf("tool installation failed: %w", err)
-	}
-
-	if err := SetupProjectBin(config.Tools); err != nil {
-		return fmt.Errorf("bin setup failed: %w", err)
 	}
 
 	return nil
