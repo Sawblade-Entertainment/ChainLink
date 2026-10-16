@@ -11,19 +11,45 @@ import (
 //go:embed plugin/ChainLink.plugin.luau
 var pluginSource string
 
-const rbxmxTemplate = `<?xml version="1.0" encoding="utf-8"?>
-<roblox xmlns:xmime="http://www.w3.org/2005/01/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
-	<Item class="Plugin" referent="RBX0">
+const rbxmxTemplate = `<roblox xmlns:xmime="http://www.w3.org/2005/05/xmlmime" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://www.roblox.com/roblox.xsd" version="4">
+	<Meta name="ExplicitAutoJoints">true</Meta>
+	<External>null</External>
+	<External>nil</External>
+	<Item class="Folder" referent="RBXc55df6218100459aacc58270c98d724a">
 		<Properties>
-			<string name="Name">ChainLink</string>
+			<Color3 name="IconTint">
+				<R>0</R>
+				<G>0</G>
+				<B>0</B>
+			</Color3>
+			<BinaryString name="AttributesSerialize"></BinaryString>
+			<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+			<bool name="DefinesCapabilities">false</bool>
+			<string name="Name">Folder</string>
+			<BinaryString name="SerializedOverrides"></BinaryString>
+			<int64 name="SourceAssetId">-1</int64>
+			<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 		</Properties>
-		<Item class="Script" referent="RBX1">
+		<Item class="Script" referent="RBXa19c4d002b5e4c6899e7991b1a5c4bb4">
 			<Properties>
-				<string name="Name">ChainLink</string>
-				<string name="Source">%s</string>
+				<ProtectedString name="Source">%s</ProtectedString>
+				<bool name="Disabled">false</bool>
+				<Content name="LinkedSource"><null></null></Content>
+				<token name="RunContext">3</token>
+				<string name="ScriptGuid">{d9ee86fa-ce8e-4bf5-b903-eec0b41c8991}</string>
+				<BinaryString name="AttributesSerialize"></BinaryString>
+				<SecurityCapabilities name="Capabilities">0</SecurityCapabilities>
+				<bool name="DefinesCapabilities">false</bool>
+				<string name="Name">Plugin</string>
+				<BinaryString name="SerializedOverrides"></BinaryString>
+				<int64 name="SourceAssetId">-1</int64>
+				<SharedString name="Tags">yuZpQdnvvUBOTYh1jqZ2cA==</SharedString>
 			</Properties>
 		</Item>
 	</Item>
+	<SharedStrings>
+		<SharedString md5="yuZpQdnvvUBOTYh1jqZ2cA=="></SharedString>
+	</SharedStrings>
 </roblox>`
 
 func getRobloxPluginsDir() (string, error) {
@@ -45,8 +71,6 @@ func getRobloxPluginsDir() (string, error) {
 }
 
 func installPlugin() error {
-	rbxmxContent := fmt.Sprintf(rbxmxTemplate, pluginSource)
-
 	pluginsDir, err := getRobloxPluginsDir()
 	if err != nil {
 		return err
@@ -56,11 +80,17 @@ func installPlugin() error {
 		return fmt.Errorf("failed to create plugins directory: %w", err)
 	}
 
+	// Use the XML format for maximum compatibility with Studio
+	content := fmt.Sprintf(rbxmxTemplate, pluginSource)
 	destPath := filepath.Join(pluginsDir, "ChainLink.rbxmx")
-	err = os.WriteFile(destPath, []byte(rbxmxContent), 0644)
+
+	err = os.WriteFile(destPath, []byte(content), 0644)
 	if err != nil {
 		return fmt.Errorf("failed to write rbxmx file: %w", err)
 	}
+
+	// If an old binary version exists, remove it to avoid confusion
+	_ = os.Remove(filepath.Join(pluginsDir, "ChainLink.rbxm"))
 
 	fmt.Printf("Successfully installed ChainLink plugin to %s\n", destPath)
 	return nil
