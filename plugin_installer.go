@@ -36,7 +36,7 @@ func getRobloxPluginsDir() (string, error) {
 	case "windows":
 		return filepath.Join(home, "AppData", "Local", "Roblox", "Plugins"), nil
 	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "Roblox", "Plugins"), nil
+		return filepath.Join(home, "Documents", "Roblox", "Plugins"), nil
 	case "linux":
 		return filepath.Join(home, ".local", "share", "roblox", "Plugins"), nil
 	default:

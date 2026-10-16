@@ -350,33 +350,27 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 	ev := Event{Op: op, Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: c.ClassName}
 	if op != "DELETE" {
 		var abs string
-		if strings.Contains(rel, "/") {
-			parts := strings.SplitN(rel, "/", 2)
-			pkgName := parts[0]
-			home, _ := os.UserHomeDir()
-			isGlobal := false
-			for _, p := range s.cfg.Packages {
-				if p.PackageName == pkgName {
-					isGlobal = true
-					break
-				}
+		// Use a unified path resolver instead of manually checking slashes
+		home, _ := os.UserHomeDir()
+		pkgBase := filepath.Join(home, ".chainlink", "packages")
+
+		// Check if it's a global package
+		isGlobal := false
+		for _, p := range s.cfg.Packages {
+			if strings.HasPrefix(rel, p.PackageName+"/") || rel == p.PackageName {
+				abs = filepath.Join(pkgBase, rel)
+				isGlobal = true
+				break
 			}
-			if isGlobal {
-				abs = filepath.Join(home, ".chainlink", "packages", pkgName, parts[1])
-			} else {
-				abs = filepath.Join(s.root, filepath.FromSlash(rel))
-			}
-		} else {
+		}
+
+		if !isGlobal {
 			abs = filepath.Join(s.root, filepath.FromSlash(rel))
 		}
 
 		// Basic path traversal check
-		if !strings.HasPrefix(abs, s.root) {
-			home, _ := os.UserHomeDir()
-			pkgBase := filepath.Join(home, ".chainlink", "packages")
-			if !strings.HasPrefix(abs, pkgBase) {
-				return Event{}, false
-			}
+		if !strings.HasPrefix(abs, s.root) && !strings.HasPrefix(abs, pkgBase) {
+			return Event{}, false
 		}
 
 		data, err := os.ReadFile(abs)
@@ -642,23 +636,22 @@ func (s *Server) primeKnown() {
 
 	// Also prime known global packages to avoid them being treated as NEW files if they are modified
 	home, _ := os.UserHomeDir()
+	pkgBase := filepath.Join(home, ".chainlink", "packages")
 	for _, p := range s.cfg.Packages {
-		pkgRoot := filepath.Join(home, ".chainlink", "packages", p.PackageName)
+		pkgRoot := filepath.Join(pkgBase, p.PackageName)
 		filepath.Walk(pkgRoot, func(pAbs string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}
-			rel, err := filepath.Rel(pkgRoot, pAbs)
-			if err != nil {
+			rel, ok := s.relPath(pAbs)
+			if !ok {
 				return nil
 			}
-			rel = filepath.ToSlash(rel)
-			fullRel := p.PackageName + "/" + rel
 			if info.IsDir() {
 				s.watcher.Add(pAbs)
-				s.known[fullRel] = true
-			} else if c := classify(s.cfg, fullRel, false); c.Syncable {
-				s.known[fullRel] = false
+				s.known[rel] = true
+			} else if c := classify(s.cfg, rel, false); c.Syncable {
+				s.known[rel] = false
 			}
 			return nil
 		})
@@ -687,8 +680,12 @@ func (s *Server) handleChanges(w http.ResponseWriter, r *http.Request) {
 
 	needFull := (since == 0 && session == "") || session != s.queue.sessionID
 	if !needFull {
-		if _, _, ok := s.queue.Since(since); !ok {
+		events, latest, ok := s.queue.Since(since)
+		if !ok {
 			needFull = true
+		} else if len(events) > 0 {
+			writeJSON(w, ChangesResponse{SessionID: s.queue.sessionID, Seq: latest, Events: events})
+			return
 		}
 	}
 	if needFull {

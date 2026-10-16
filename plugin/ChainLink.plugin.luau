@@ -213,6 +213,13 @@ local function applyDelete(ev)
 	local inst = findInstance(ev.target, ev.instancePath)
 	instanceCache[key] = nil
 	if not inst then return end
+	
+	-- Filter: Never delete the root target itself (e.g. ServerScriptService)
+	if #ev.instancePath == 0 then
+		logLine("Skipping delete of root target: " .. ev.target, Color3.fromRGB(230, 180, 60))
+		return
+	end
+
 	if inst:GetAttribute(ATTR) ~= key then
 		logLine("Skipping delete of unmanaged " .. inst:GetFullName(), Color3.fromRGB(230, 180, 60))
 		return
