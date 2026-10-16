@@ -400,6 +400,37 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 	return Classified{Target: target, InstancePath: append(parent, stem), ClassName: class, Syncable: true}
 }
 
+func instanceKey(target string, path []string) string {
+	return target + "\x00" + strings.Join(path, "\x00")
+}
+
+// claim reports whether rel may own the instance; first owner wins.
+func (s *Server) claim(ev Event) bool {
+	key := instanceKey(ev.Target, ev.InstancePath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if owner, ok := s.owners[key]; ok && owner != ev.Path {
+		if _, err := os.Stat(s.absPath(owner)); err == nil {
+			log.Printf("Warning: %s and %s both map to %s.%s; ignoring %s",
+				owner, ev.Path, ev.Target, strings.Join(ev.InstancePath, "."), ev.Path)
+			return false
+		}
+	}
+	s.owners[key] = ev.Path
+	return true
+}
+
+func (s *Server) release(ev Event) bool {
+	key := instanceKey(ev.Target, ev.InstancePath)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.owners[key] != ev.Path {
+		return false // we never owned it; don't delete someone else's instance
+	}
+	delete(s.owners, key)
+	return true
+}
+
 // ---------- Server ----------
 
 type Server struct {
@@ -417,6 +448,7 @@ type Server struct {
 	known       map[string]bool
 	pending     map[string]*time.Timer
 	reloadTimer *time.Timer
+	owners      map[string]string // instanceKey -> rel path that owns it
 }
 
 func (s *Server) conf() ProjectConfig {
@@ -472,6 +504,14 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 	ev := Event{Op: op, Path: rel, Target: c.Target, InstancePath: c.InstancePath, ClassName: c.ClassName}
 	if op == "DELETE" {
 		ev.KeepChildren = c.IsInit
+		if !c.IsInit {
+			// File merged with a sibling folder of the same name: turn the
+			// instance back into a Folder instead of destroying the folder's contents.
+			sibling := filepath.Join(filepath.Dir(s.absPath(rel)), c.InstancePath[len(c.InstancePath)-1])
+			if dirExists(sibling) {
+				ev.KeepChildren = true
+			}
+		}
 		return ev, true
 	}
 	data, err := os.ReadFile(s.absPath(rel))
@@ -505,6 +545,41 @@ func isShadowedRootInit(cfg ProjectConfig, rel string) bool {
 	stem := strings.TrimSuffix(file, filepath.Ext(file))
 	stem = strings.TrimSuffix(strings.TrimSuffix(stem, ".server"), ".client")
 	return strings.EqualFold(stem, "init")
+}
+
+// removeDir emits deletes for a removed directory. If a file still owns the
+// same instance (file+folder merge), only the folder's contents are removed
+// so the file's instance survives and "unmerges".
+func (s *Server) removeDir(rel string, children []string, childIsDir map[string]bool) {
+	cfg := s.conf()
+	c := classify(cfg, rel, true)
+	if !c.Syncable {
+		return
+	}
+
+	s.mu.Lock()
+	owner, merged := s.owners[instanceKey(c.Target, c.InstancePath)]
+	s.mu.Unlock()
+
+	if !merged {
+		s.queue.Push(Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
+		log.Printf("[DELETE] %s/", rel)
+		return
+	}
+
+	sort.Strings(children)
+	var evs []Event
+	for _, child := range children {
+		if childIsDir[child] {
+			if cc := classify(cfg, child, true); cc.Syncable {
+				evs = append(evs, Event{Op: "DELETE", Path: child, Target: cc.Target, InstancePath: cc.InstancePath})
+			}
+		} else if ev, ok := s.fileEvent(child, "DELETE"); ok {
+			evs = append(evs, ev)
+		}
+	}
+	s.queue.Push(evs...)
+	log.Printf("[UNMERGE] %s/ removed from %s (%d children)", rel, owner, len(evs))
 }
 
 func jsonToLuau(v any) string {
@@ -546,7 +621,7 @@ func (s *Server) walkFiles(absDir string, out *[]Event) (rootInit bool) {
 		if !ok {
 			return nil
 		}
-		if ev, ok := s.fileEvent(rel, "CREATE"); ok {
+		if ev, ok := s.fileEvent(rel, "CREATE"); ok && s.claim(ev) {
 			*out = append(*out, ev)
 			if c := classify(cfg, rel, false); c.IsInit && len(c.InstancePath) == 1 && strings.HasPrefix(rel, pkgPrefix) {
 				rootInit = true
@@ -576,6 +651,10 @@ func (s *Server) packageEvents(p GlobalPackageMapping) []Event {
 }
 
 func (s *Server) snapshot() []Event {
+	s.mu.Lock()
+	s.owners = map[string]string{}
+	s.mu.Unlock()
+
 	cfg := s.conf()
 	out := bootstrapEvents(cfg) // depth 1, so they sort before their children
 	for _, r := range cfg.Roots {
@@ -657,25 +736,37 @@ func (s *Server) resolve(rel string) {
 		if !wasKnown {
 			return
 		}
+		var children []string
+		childIsDir := map[string]bool{}
+
 		s.mu.Lock()
 		delete(s.known, rel)
 		if wasDir {
-			for k := range s.known {
-				if strings.HasPrefix(k, rel+"/") {
-					delete(s.known, k)
+			prefix := rel + "/"
+			for k, isDir := range s.known {
+				if !strings.HasPrefix(k, prefix) {
+					continue
+				}
+				if !strings.Contains(k[len(prefix):], "/") {
+					children = append(children, k) // direct child
+					childIsDir[k] = isDir
+				}
+				delete(s.known, k)
+			}
+			// Everything under the folder is gone; drop its ownership claims.
+			for key, owner := range s.owners {
+				if strings.HasPrefix(owner, prefix) {
+					delete(s.owners, key)
 				}
 			}
 		}
 		s.mu.Unlock()
 
 		if wasDir {
-			if c := classify(s.conf(), rel, true); c.Syncable {
-				s.queue.Push(Event{Op: "DELETE", Path: rel, Target: c.Target, InstancePath: c.InstancePath})
-				log.Printf("[DELETE] %s/", rel)
-			}
+			s.removeDir(rel, children, childIsDir)
 			return
 		}
-		if ev, ok := s.fileEvent(rel, "DELETE"); ok {
+		if ev, ok := s.fileEvent(rel, "DELETE"); ok && s.release(ev) {
 			s.queue.Push(ev)
 			log.Printf("[DELETE] %s", rel)
 		}
@@ -718,7 +809,7 @@ func (s *Server) resolve(rel string) {
 		op = "CREATE"
 	}
 	ev, ok := s.fileEvent(rel, op)
-	if !ok {
+	if !ok || !s.claim(ev) {
 		return
 	}
 	s.mu.Lock()
@@ -744,6 +835,11 @@ func (s *Server) forget(rootRel string) {
 		if k == rootRel || strings.HasPrefix(k, rootRel+"/") {
 			t.Stop()
 			delete(s.pending, k)
+		}
+	}
+	for k, owner := range s.owners {
+		if owner == rootRel || strings.HasPrefix(owner, rootRel+"/") {
+			delete(s.owners, k)
 		}
 	}
 }
@@ -1041,6 +1137,7 @@ func serve() error {
 		watcher: watcher,
 		known:   map[string]bool{},
 		pending: map[string]*time.Timer{},
+		owners:  map[string]string{},
 	}
 
 	watcher.Add(root)            // catches chain.toml / chainlink.json edits
