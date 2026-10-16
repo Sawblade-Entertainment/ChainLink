@@ -25,64 +25,8 @@ type GitHubAsset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// SetupProjectBin creates symlinks in the current project's .bin directory
-// pointing to the globally installed tools.
+// SetupProjectBin is deprecated and should not be used.
 func SetupProjectBin(tools map[string]string) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	projectBinDir := "./.bin"
-	if err := os.MkdirAll(projectBinDir, 0755); err != nil {
-		return fmt.Errorf("failed to create project bin directory: %w", err)
-	}
-
-	for name, spec := range tools {
-		parts := strings.Split(spec, "@")
-		if len(parts) != 2 {
-			continue
-		}
-		tag := parts[1]
-
-		globalToolDir := filepath.Join(home, ".chainlink", "tools", name, tag)
-		if !strings.HasPrefix(tag, "v") {
-			vTag := "v" + tag
-			vGlobalToolDir := filepath.Join(home, ".chainlink", "tools", name, vTag)
-			if _, err := os.Stat(vGlobalToolDir); err == nil {
-				globalToolDir = vGlobalToolDir
-			}
-		}
-
-		// Find the actual binary inside the global tool directory
-		var binaryPath string
-		err := filepath.Walk(globalToolDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() && filepath.Ext(path) == "" {
-				binaryPath = path
-				return filepath.SkipDir // Found the binary, stop walking
-			}
-			return nil
-		})
-
-		if err != nil || binaryPath == "" {
-			return fmt.Errorf("could not find binary for tool %s in %s", name, globalToolDir)
-		}
-
-		symlinkPath := filepath.Join(projectBinDir, name)
-
-		// Remove existing symlink/file if it exists
-		if _, err := os.Lstat(symlinkPath); err == nil {
-			os.Remove(symlinkPath)
-		}
-
-		if err := os.Symlink(binaryPath, symlinkPath); err != nil {
-			return fmt.Errorf("failed to create symlink for %s: %w", name, err)
-		}
-		fmt.Printf("Linked %s -> %s\n", name, binaryPath)
-	}
 	return nil
 }
 
