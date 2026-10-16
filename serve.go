@@ -428,6 +428,12 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 		return Event{}, false
 	}
 	source := string(data)
+	if strings.HasSuffix(strings.ToLower(rel), ".luau") || strings.HasSuffix(strings.ToLower(rel), ".lua") {
+		header := "--!strict\n--!native\n--!optimize 2\n"
+		if !strings.HasPrefix(source, "--!strict") {
+			source = header + source
+		}
+	}
 	if strings.HasSuffix(strings.ToLower(rel), ".json") {
 		var parsed any
 		if err := json.Unmarshal(data, &parsed); err != nil {
