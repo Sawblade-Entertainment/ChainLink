@@ -16,9 +16,9 @@ type PackageInfo struct {
 }
 
 type ChainLinkConfig struct {
-	Package  PackageInfo
-	Tools    map[string]string
-	Packages map[string]string
+	Package  PackageInfo       `toml:"Package"`
+	Tools    map[string]string `toml:"Tools"`
+	Packages map[string]string `toml:"Packages"`
 }
 
 func main() {
@@ -41,10 +41,16 @@ func main() {
 					break
 				}
 			}
+		} else {
+			// If chain.toml is missing, we can't resolve the tool name
+			fmt.Printf("Tool %s not defined in chain.toml (config missing)\n", invokedAs)
+			os.Exit(1)
 		}
 
 		if err := proxyToTool(toolName); err != nil {
-			fmt.Printf("Tool %s not installed in current directory\n", invokedAs)
+			// Only print the error if the tool was actually not found.
+			// If the tool ran but returned an exit code, proxyToTool already handled the execution.
+			fmt.Printf("Tool %s not defined in chain.toml\n", invokedAs)
 			os.Exit(1)
 		}
 		return
@@ -234,8 +240,18 @@ func proxyToTool(toolName string) error {
 		return fmt.Errorf("could not find chain.toml in current directory: %w", err)
 	}
 
-	spec, ok := config.Tools[toolName]
-	if !ok {
+	// Case-insensitive lookup for the spec
+	var spec string
+	var found bool
+	for name, s := range config.Tools {
+		if strings.EqualFold(name, toolName) {
+			spec = s
+			found = true
+			break
+		}
+	}
+
+	if !found {
 		return fmt.Errorf("tool %s is not defined in chain.toml", toolName)
 	}
 
@@ -284,5 +300,13 @@ func proxyToTool(toolName string) error {
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 
-	return cmd.Run()
+	err = cmd.Run()
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitError.ExitCode())
+		}
+		return err
+	}
+
+	return nil
 }
