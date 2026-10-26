@@ -17,77 +17,136 @@ local DEFAULT_URL = "http://localhost:8080"
 local running = false
 local lastSeq = 0
 local sessionId = ""
-local instanceCache: { [string]: Instance } = {}
+local instanceCache = {}
 
 -- ---------- UI ----------
 
 local toolbar = plugin:CreateToolbar("ChainLink")
 local toggleButton = toolbar:CreateButton("ChainLink", "Open ChainLink sync panel", "rbxassetid://4458901886")
 
-local widget = plugin:CreateDockWidgetPluginGui("ChainLinkWidget", DockWidgetPluginGuiInfo.new(
-	Enum.InitialDockState.Right, false, false, 300, 400, 220, 200
-))
+local widget = plugin:CreateDockWidgetPluginGuiAsync(
+	"ChainLinkWidget",
+	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, false, false, 300, 400, 220, 200)
+)
 widget.Title = "ChainLink"
 
-local function make(class: string, props: { [string]: any }, parent: Instance?): Instance
+local function make(class, props, parent)
 	local inst = Instance.new(class)
-	for k, v in props do (inst :: any)[k] = v end
+	for k, v in props do
+		inst[k] = v
+	end
 	inst.Parent = parent
 	return inst
 end
 
-local root = make("Frame", { Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(46, 46, 46), BorderSizePixel = 0 }, widget)
-make("UIPadding", { PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8), PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, root)
+local root = make(
+	"Frame",
+	{ Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.fromRGB(46, 46, 46), BorderSizePixel = 0 },
+	widget
+)
+make(
+	"UIPadding",
+	{
+		PaddingTop = UDim.new(0, 8),
+		PaddingBottom = UDim.new(0, 8),
+		PaddingLeft = UDim.new(0, 8),
+		PaddingRight = UDim.new(0, 8),
+	},
+	root
+)
 make("UIListLayout", { Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder }, root)
 
 local statusRow = make("Frame", { Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, LayoutOrder = 1 }, root)
-local statusDot = make("Frame", { Size = UDim2.fromOffset(12, 12), Position = UDim2.fromOffset(0, 4), BackgroundColor3 = Color3.fromRGB(200, 60, 60), BorderSizePixel = 0 }, statusRow)
+local statusDot = make(
+	"Frame",
+	{
+		Size = UDim2.fromOffset(12, 12),
+		Position = UDim2.fromOffset(0, 4),
+		BackgroundColor3 = Color3.fromRGB(200, 60, 60),
+		BorderSizePixel = 0,
+	},
+	statusRow
+)
 make("UICorner", { CornerRadius = UDim.new(1, 0) }, statusDot)
 local statusLabel = make("TextLabel", {
-	Size = UDim2.new(1, -20, 1, 0), Position = UDim2.fromOffset(20, 0), BackgroundTransparency = 1,
-	Text = "Disconnected", TextColor3 = Color3.fromRGB(220, 220, 220), TextXAlignment = Enum.TextXAlignment.Left, Font = Enum.Font.SourceSans, TextSize = 16,
-}, statusRow) :: TextLabel
+	Size = UDim2.new(1, -20, 1, 0),
+	Position = UDim2.fromOffset(20, 0),
+	BackgroundTransparency = 1,
+	Text = "Disconnected",
+	TextColor3 = Color3.fromRGB(220, 220, 220),
+	TextXAlignment = Enum.TextXAlignment.Left,
+	Font = Enum.Font.SourceSans,
+	TextSize = 16,
+}, statusRow)
 
-local function textBox(placeholder: string, value: string, order: number): TextBox
+local function textBox(placeholder, value, order)
 	return make("TextBox", {
-		Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = Color3.fromRGB(30, 30, 30), BorderSizePixel = 0,
-		Text = value, PlaceholderText = placeholder, TextColor3 = Color3.fromRGB(230, 230, 230),
-		ClearTextOnFocus = false, Font = Enum.Font.Code, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, LayoutOrder = order,
-	}, root) :: TextBox
+		Size = UDim2.new(1, 0, 0, 26),
+		BackgroundColor3 = Color3.fromRGB(30, 30, 30),
+		BorderSizePixel = 0,
+		Text = value,
+		PlaceholderText = placeholder,
+		TextColor3 = Color3.fromRGB(230, 230, 230),
+		ClearTextOnFocus = false,
+		Font = Enum.Font.Code,
+		TextSize = 14,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		LayoutOrder = order,
+	}, root)
 end
 
 local urlBox = textBox("Server URL", plugin:GetSetting(SETTING_URL) or DEFAULT_URL, 2)
 local tokenBox = textBox("Token (optional)", plugin:GetSetting(SETTING_TOKEN) or "", 3)
 
 local connectButton = make("TextButton", {
-	Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = Color3.fromRGB(0, 120, 215), BorderSizePixel = 0,
-	Text = "Connect", TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.SourceSansBold, TextSize = 16, LayoutOrder = 4,
-}, root) :: TextButton
+	Size = UDim2.new(1, 0, 0, 28),
+	BackgroundColor3 = Color3.fromRGB(0, 120, 215),
+	BorderSizePixel = 0,
+	Text = "Connect",
+	TextColor3 = Color3.new(1, 1, 1),
+	Font = Enum.Font.SourceSansBold,
+	TextSize = 16,
+	LayoutOrder = 4,
+}, root)
 
 local logFrame = make("ScrollingFrame", {
-	Size = UDim2.new(1, 0, 1, -130), BackgroundColor3 = Color3.fromRGB(30, 30, 30), BorderSizePixel = 0,
-	CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 6, LayoutOrder = 5,
-}, root) :: ScrollingFrame
+	Size = UDim2.new(1, 0, 1, -130),
+	BackgroundColor3 = Color3.fromRGB(30, 30, 30),
+	BorderSizePixel = 0,
+	CanvasSize = UDim2.new(),
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	ScrollBarThickness = 6,
+	LayoutOrder = 5,
+}, root)
 make("UIListLayout", { SortOrder = Enum.SortOrder.LayoutOrder }, logFrame)
 
 local logCount = 0
-local function logLine(msg: string, color: Color3?)
-	logCount += 1
+local function logLine(msg, color)
+	logCount = logCount + 1
 	make("TextLabel", {
-		Size = UDim2.new(1, -6, 0, 16), BackgroundTransparency = 1, Text = msg, LayoutOrder = logCount,
-		TextColor3 = color or Color3.fromRGB(200, 200, 200), Font = Enum.Font.Code, TextSize = 13,
-		TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+		Size = UDim2.new(1, -6, 0, 16),
+		BackgroundTransparency = 1,
+		Text = msg,
+		LayoutOrder = logCount,
+		TextColor3 = color or Color3.fromRGB(200, 200, 200),
+		Font = Enum.Font.Code,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 	}, logFrame)
 	if logCount > 200 then
 		local children = logFrame:GetChildren()
 		for _, c in children do
-			if c:IsA("TextLabel") then c:Destroy() break end
+			if c:IsA("TextLabel") then
+				c:Destroy()
+				break
+			end
 		end
 	end
 	logFrame.CanvasPosition = Vector2.new(0, math.huge)
 end
 
-local function setStatus(connected: boolean, text: string)
+local function setStatus(connected, text)
 	statusDot.BackgroundColor3 = connected and Color3.fromRGB(60, 180, 90) or Color3.fromRGB(200, 60, 60)
 	statusLabel.Text = text
 	connectButton.Text = running and "Disconnect" or "Connect"
@@ -96,12 +155,16 @@ end
 
 -- ---------- Instance resolution ----------
 
-local function resolveTarget(target: string): Instance?
+local function resolveTarget(target)
 	local parts = string.split(target, ".")
-	local ok, current = pcall(function() return game:GetService(parts[1]) end)
-	if not ok or not current then return nil end
+	local ok, current = pcall(function()
+		return game:GetService(parts[1])
+	end)
+	if not ok or not current then
+		return nil
+	end
 	for i = 2, #parts do
-		local child = (current :: Instance):FindFirstChild(parts[i])
+		local child = current:FindFirstChild(parts[i])
 		if not child then
 			-- Create missing target folders automatically
 			child = Instance.new("Folder")
@@ -113,33 +176,41 @@ local function resolveTarget(target: string): Instance?
 	return current
 end
 
-local function keyFor(target: string, segments: { string }): string
+local function keyFor(target, segments)
 	return target .. "/" .. table.concat(segments, "/")
 end
 
-local function findInstance(target: string, segments: { string }): Instance?
+local function findInstance(target, segments)
 	local key = keyFor(target, segments)
 	local cached = instanceCache[key]
-	if cached and cached.Parent then return cached end
+	if cached and cached.Parent then
+		return cached
+	end
 	instanceCache[key] = nil
 
 	local current = resolveTarget(target)
-	if not current then return nil end
+	if not current then
+		return nil
+	end
 	for _, seg in segments do
-		current = (current :: Instance):FindFirstChild(seg)
-		if not current then return nil end
+		current = current:FindFirstChild(seg)
+		if not current then
+			return nil
+		end
 	end
 	instanceCache[key] = current
 	return current
 end
 
 -- Ensures Folders exist along `segments` (not including the final element) and returns the parent.
-local function ensureParent(target: string, segments: { string }): Instance?
+local function ensureParent(target, segments)
 	local current = resolveTarget(target)
-	if not current then return nil end
+	if not current then
+		return nil
+	end
 	for i = 1, #segments - 1 do
 		local seg = segments[i]
-		local child = (current :: Instance):FindFirstChild(seg)
+		local child = current:FindFirstChild(seg)
 		if not child then
 			child = Instance.new("Folder")
 			child.Name = seg
@@ -152,25 +223,29 @@ local function ensureParent(target: string, segments: { string }): Instance?
 	return current
 end
 
-local function replaceInstance(old: Instance, newClass: string): Instance
+local function replaceInstance(old, newClass)
 	local new = Instance.new(newClass)
 	new.Name = old.Name
 	for attr, value in old:GetAttributes() do
 		new:SetAttribute(attr, value)
 	end
-	for _, child in old:GetChildren() do child.Parent = new end
+	for _, child in old:GetChildren() do
+		child.Parent = new
+	end
 	new.Parent = old.Parent
 	old:Destroy()
 	return new
 end
 
-local function setSource(inst: Instance, source: string)
+local function setSource(inst, source)
 	if inst:IsA("LuaSourceContainer") then
-		local ok, err = pcall(function()
-			ScriptEditorService:UpdateSourceAsync(inst, function() return source end)
+		local ok, _ = pcall(function()
+			ScriptEditorService:UpdateSourceAsync(inst, function()
+				return source
+			end)
 		end)
 		if not ok then
-			(inst :: any).Source = source -- fallback (script not open in editor)
+			inst.Source = source -- fallback (script not open in editor)
 		end
 	elseif inst:IsA("StringValue") then
 		inst.Value = source
@@ -180,9 +255,9 @@ end
 -- ---------- Applying events ----------
 
 local function applyCreateOrUpdate(ev)
-	local segments: { string } = ev.instancePath
+	local segments = ev.instancePath
 	local key = keyFor(ev.target, segments)
-	local inst: Instance?
+	local inst
 
 	if #segments == 0 then
 		-- init file directly in a root dir: the root itself can't be a script; ignore.
@@ -213,8 +288,10 @@ local function applyDelete(ev)
 	local key = keyFor(ev.target, ev.instancePath)
 	local inst = findInstance(ev.target, ev.instancePath)
 	instanceCache[key] = nil
-	if not inst then return end
-	
+	if not inst then
+		return
+	end
+
 	-- Filter: Never delete the root target itself (e.g. ServerScriptService)
 	if #ev.instancePath == 0 then
 		logLine("Skipping delete of root target: " .. ev.target, Color3.fromRGB(230, 180, 60))
@@ -232,7 +309,7 @@ local function applyDelete(ev)
 	end
 end
 
-local function pruneStale(validKeys: { [string]: boolean })
+local function pruneStale(validKeys)
 	-- Remove managed instances that are no longer present in the snapshot.
 	for _, inst in game:GetDescendants() do
 		local key = inst:GetAttribute(ATTR)
@@ -242,10 +319,15 @@ local function pruneStale(validKeys: { [string]: boolean })
 			if inst:IsA("Folder") then
 				for _, d in inst:GetDescendants() do
 					local dk = d:GetAttribute(ATTR)
-					if type(dk) == "string" and validKeys[dk] then keepAsFolder = true break end
+					if type(dk) == "string" and validKeys[dk] then
+						keepAsFolder = true
+						break
+					end
 				end
 			end
-			if not keepAsFolder then inst:Destroy() end
+			if not keepAsFolder then
+				inst:Destroy()
+			end
 		end
 	end
 	instanceCache = {}
@@ -253,12 +335,14 @@ end
 
 local function applyBatch(resp)
 	local events = resp.events or {}
-	if #events == 0 and not resp.full then return end
+	if #events == 0 and not resp.full then
+		return
+	end
 
 	local recording = ChangeHistoryService:TryBeginRecording("ChainLink sync")
 	local ok, err = pcall(function()
 		if resp.full then
-			local valid: { [string]: boolean } = {}
+			local valid = {}
 			for _, ev in events do
 				valid[keyFor(ev.target, ev.instancePath)] = true
 				-- mark folder ancestors valid too
@@ -283,7 +367,10 @@ local function applyBatch(resp)
 		end
 	end)
 	if recording then
-		ChangeHistoryService:FinishRecording(recording, ok and Enum.FinishRecordingOperation.Commit or Enum.FinishRecordingOperation.Cancel)
+		ChangeHistoryService:FinishRecording(
+			recording,
+			ok and Enum.FinishRecordingOperation.Commit or Enum.FinishRecordingOperation.Cancel
+		)
 	end
 	if not ok then
 		logLine("Apply error: " .. tostring(err), Color3.fromRGB(230, 80, 80))
@@ -292,9 +379,11 @@ end
 
 -- ---------- Polling ----------
 
-local function request(url: string, token: string)
+local function request(url, token)
 	local headers = {}
-	if token ~= "" then headers["X-ChainLink-Token"] = token end
+	if token ~= "" then
+		headers["X-ChainLink-Token"] = token
+	end
 	local res = HttpService:RequestAsync({ Url = url, Method = "GET", Headers = headers })
 	if not res.Success then
 		error(string.format("HTTP %d %s", res.StatusCode, res.StatusMessage))
@@ -302,29 +391,37 @@ local function request(url: string, token: string)
 	return HttpService:JSONDecode(res.Body)
 end
 
-local function pollLoop(baseUrl: string, token: string)
+local function pollLoop(baseUrl, token)
 	local backoff = 1
 	local fatal = false
+	local skip = false
 	while running do
 		local url = string.format("%s/changes?since=%d&session=%s", baseUrl, lastSeq, HttpService:UrlEncode(sessionId))
 		local ok, result = pcall(request, url, token)
-		if not running then break end
+		if not running then
+			break
+		end
 
 		if ok then
-			if backoff > 1 then logLine("Reconnected", Color3.fromRGB(120, 200, 140)) end
+			if backoff > 1 then
+				logLine("Reconnected", Color3.fromRGB(120, 200, 140))
+			end
 			backoff = 1
 			setStatus(true, "Connected (" .. baseUrl .. ")")
-			
+
 			if result.sessionId ~= sessionId then
 				sessionId = result.sessionId
 			end
-			
+
 			applyBatch(result)
 			lastSeq = result.seq
 		else
 			local msg = tostring(result)
 			if string.find(msg, "not enabled", 1, true) then
-				logLine("Enable HTTP requests: Game Settings > Security > Allow HTTP Requests", Color3.fromRGB(230, 80, 80))
+				logLine(
+					"Enable HTTP requests: Game Settings > Security > Allow HTTP Requests",
+					Color3.fromRGB(230, 80, 80)
+				)
 				running = false
 				fatal = true
 				break
@@ -334,12 +431,17 @@ local function pollLoop(baseUrl: string, token: string)
 				backoff = math.max(backoff * 2, 5)
 				setStatus(false, "Rate limited... backing off")
 				task.wait(backoff)
-				continue
+				skip = true
 			end
-			setStatus(false, "Reconnecting… (" .. msg .. ")")
-			if backoff == 1 then logLine("Connection lost: " .. msg, Color3.fromRGB(230, 120, 60)) end
-			task.wait(backoff)
-			backoff = math.min(backoff * 2, 10)
+			if not skip then
+				setStatus(false, "Reconnecting… (" .. msg .. ")")
+				if backoff == 1 then
+					logLine("Connection lost: " .. msg, Color3.fromRGB(230, 120, 60))
+				end
+				task.wait(backoff)
+				backoff = math.min(backoff * 2, 10)
+			end
+			skip = false
 		end
 	end
 	setStatus(false, fatal and "HTTP disabled" or "Disconnected")
@@ -366,7 +468,11 @@ local function disconnect()
 end
 
 connectButton.MouseButton1Click:Connect(function()
-	if running then disconnect() else connect() end
+	if running then
+		disconnect()
+	else
+		connect()
+	end
 end)
 
 toggleButton.Click:Connect(function()
