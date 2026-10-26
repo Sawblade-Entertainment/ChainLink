@@ -46,6 +46,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+        shell: bash
         run: |
           BINARY_NAME=chainlink
           if [ "${{ matrix.goos }}" = "windows" ]; then
