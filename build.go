@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 )
 
 // --- Tree model ---
@@ -19,13 +21,14 @@ type Instance struct {
 	Name     string
 	Props    []Property
 	Children []*Instance
+	RawXML   string // pre-serialized <Item>…</Item> subtree (from .rbxmx prefabs)
 }
 
 type Builder struct {
 	cfg     ProjectConfig
 	root    string
-	byPath  map[string]*Instance // unique dotted path -> instance
-	top     []*Instance          // top-level items (services)
+	byPath  map[string]*Instance
+	top     []*Instance
 	nextRef int
 }
 
@@ -34,13 +37,11 @@ func NewBuilder(cfg ProjectConfig, root string) *Builder {
 }
 
 func (b *Builder) newReferent() string {
-	r := fmt.Sprintf("RBX%032d", b.nextRef) // any unique string works
+	r := fmt.Sprintf("RBX%032d", b.nextRef)
 	b.nextRef++
 	return r
 }
 
-// getOrCreate returns the instance at `path`, creating it (under `parent`,
-// or at top level if parent == nil) if it doesn't exist yet.
 func (b *Builder) getOrCreate(path, class, name string, parent *Instance) *Instance {
 	if inst, ok := b.byPath[path]; ok {
 		return inst
@@ -59,16 +60,16 @@ func (b *Builder) service(name string) *Instance {
 	return b.getOrCreate(name, name, name, nil)
 }
 
-// "ReplicatedStorage.shared.util" -> service + nested Folders
 func (b *Builder) resolveTarget(target string) *Instance {
 	parts := strings.Split(target, ".")
 	cur := b.service(parts[0])
 	for i := 1; i < len(parts); i++ {
 		path := strings.Join(parts[:i+1], ".")
 		class := "Folder"
-		if path == "StarterPlayer.StarterPlayerScripts" {
+		switch path {
+		case "StarterPlayer.StarterPlayerScripts":
 			class = "StarterPlayerScripts"
-		} else if path == "StarterPlayer.StarterCharacterScripts" {
+		case "StarterPlayer.StarterCharacterScripts":
 			class = "StarterCharacterScripts"
 		}
 		cur = b.getOrCreate(path, class, parts[i], cur)
@@ -76,25 +77,86 @@ func (b *Builder) resolveTarget(target string) *Instance {
 	return cur
 }
 
+func (b *Builder) place(target string, instancePath []string, leafClass string) *Instance {
+	cur := b.resolveTarget(target)
+	for i, seg := range instancePath {
+		fullPath := target + "." + strings.Join(instancePath[:i+1], ".")
+		class := "Folder"
+		if i == len(instancePath)-1 && leafClass != "" {
+			class = leafClass
+		}
+		cur = b.getOrCreate(fullPath, class, seg, cur)
+	}
+	return cur
+}
+
+func setSource(inst *Instance, src string) {
+	for i := range inst.Props {
+		if inst.Props[i].Name == "Source" {
+			inst.Props[i].Value = src
+			return
+		}
+	}
+	inst.Props = append(inst.Props, Property{Name: "Source", Type: "ProtectedString", Value: src})
+}
+
 // --- Serialization ---
 
+// sanitize drops characters that are illegal in XML 1.0 and repairs invalid UTF-8.
+func sanitize(s string) string {
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, isIllegalXML) {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s))
+	for _, r := range s { // ranging decodes invalid bytes as U+FFFD
+		if r == utf8.RuneError || isIllegalXML(r) {
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
+}
+
+func isIllegalXML(r rune) bool {
+	switch {
+	case r == 0x9 || r == 0xA || r == 0xD:
+		return false
+	case r >= 0x20 && r <= 0xD7FF, r >= 0xE000 && r <= 0xFFFD, r >= 0x10000 && r <= 0x10FFFF:
+		return false
+	}
+	return true
+}
+
 func escText(s string) string {
-	r := strings.NewReplacer("&", "&", "<", "<", ">", ">")
-	return r.Replace(s)
+	return strings.NewReplacer("&", "&", "<", "<", ">", ">").Replace(sanitize(s))
 }
 
 func escAttr(s string) string {
-	r := strings.NewReplacer("&", "&", "<", "<", ">", ">", `"`, "\"")
-	return r.Replace(s)
+	return strings.NewReplacer("&", "&", "<", "<", ">", ">", `"`, "\"").Replace(sanitize(s))
+}
+
+// cdata wraps s in a CDATA section, splitting on any "]]>" so it can't terminate early.
+func cdata(s string) string {
+	return "<![CDATA[" + strings.ReplaceAll(sanitize(s), "]]>", "]]]]><![CDATA[>") + "]]>"
 }
 
 func writeItem(sb *strings.Builder, inst *Instance, depth int) {
 	ind := strings.Repeat("\t", depth)
+	if inst.RawXML != "" {
+		sb.WriteString(inst.RawXML)
+		sb.WriteString("\n")
+		return
+	}
 	fmt.Fprintf(sb, "%s<Item class=\"%s\" referent=\"%s\">\n", ind, escAttr(inst.Class), escAttr(inst.Referent))
 	fmt.Fprintf(sb, "%s\t<Properties>\n", ind)
 	fmt.Fprintf(sb, "%s\t\t<string name=\"Name\">%s</string>\n", ind, escText(inst.Name))
 	for _, p := range inst.Props {
-		fmt.Fprintf(sb, "%s\t\t<%s name=\"%s\">%s</%s>\n", ind, p.Type, escAttr(p.Name), escText(p.Value), p.Type)
+		if p.Type == "ProtectedString" {
+			fmt.Fprintf(sb, "%s\t\t<ProtectedString name=\"%s\">%s</ProtectedString>\n", ind, escAttr(p.Name), cdata(p.Value))
+		} else {
+			fmt.Fprintf(sb, "%s\t\t<%s name=\"%s\">%s</%s>\n", ind, p.Type, escAttr(p.Name), escText(p.Value), p.Type)
+		}
 	}
 	fmt.Fprintf(sb, "%s\t</Properties>\n", ind)
 	for _, c := range inst.Children {
@@ -113,37 +175,118 @@ func (b *Builder) build() []byte {
 	return []byte(sb.String())
 }
 
+// --- Prefab (.rbxmx) support ---
+
+// extractItems pulls the raw <Item>…</Item> subtrees out of an .rbxmx model file.
+func extractItems(data []byte) ([]string, error) {
+	dec := xml.NewDecoder(strings.NewReader(string(data)))
+	var items []string
+	var depth int
+	var start int64
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "Item" {
+				if depth == 0 {
+					start = dec.InputOffset() - int64(len(rawStartTag(data, dec.InputOffset())))
+				}
+				depth++
+			}
+		case xml.EndElement:
+			if t.Name.Local == "Item" {
+				depth--
+				if depth == 0 {
+					items = append(items, string(data[start:dec.InputOffset()]))
+				}
+			}
+		}
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("no <Item> elements found")
+	}
+	return items, nil
+}
+
+// rawStartTag returns the bytes of the start tag that ends at offset `end`.
+func rawStartTag(data []byte, end int64) []byte {
+	i := int(end) - 1
+	for i >= 0 && data[i] != '<' {
+		i--
+	}
+	if i < 0 {
+		return nil
+	}
+	return data[i:int(end)]
+}
+
 // --- Build command ---
 
+func (b *Builder) syncBootstrap() {
+	for _, ev := range bootstrapEvents(b.cfg) {
+		if ev.Op != "CREATE" {
+			continue
+		}
+		inst := b.place(ev.Target, ev.InstancePath, ev.ClassName)
+		setSource(inst, ev.Source)
+	}
+}
+
+func isScriptClass(c string) bool {
+	switch c {
+	case "Script", "LocalScript", "ModuleScript":
+		return true
+	}
+	return false
+}
+
 func (b *Builder) syncDir(absDir, target, relPrefix string) {
-	targetInst := b.resolveTarget(target)
+	b.resolveTarget(target)
 
 	filepath.Walk(absDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil || path == absDir {
 			return nil
 		}
 		rel, _ := filepath.Rel(absDir, path)
-		c := classify(b.cfg, relPrefix+rel, info.IsDir())
+		c := classify(b.cfg, relPrefix+filepath.ToSlash(rel), info.IsDir())
 		if !c.Syncable {
 			return nil
 		}
 
-		cur := targetInst
-		for i, seg := range c.InstancePath {
-			fullPath := target + "." + strings.Join(c.InstancePath[:i+1], ".")
-			class := "Folder"
-			if i == len(c.InstancePath)-1 && !info.IsDir() {
-				class = c.ClassName
-			}
-			cur = b.getOrCreate(fullPath, class, seg, cur)
+		if info.IsDir() {
+			b.place(c.Target, c.InstancePath, "")
+			return nil
 		}
 
-		if !info.IsDir() {
-			data, err := os.ReadFile(path) // path is already absolute
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+
+		switch {
+		case isScriptClass(c.ClassName):
+			inst := b.place(c.Target, c.InstancePath, c.ClassName)
+			setSource(inst, string(data))
+
+		case strings.HasSuffix(path, ".rbxmx"):
+			items, err := extractItems(data)
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "build: skipping %s: %v\n", rel, err)
 				return nil
 			}
-			cur.Props = append(cur.Props, Property{Name: "Source", Type: "ProtectedString", Value: string(data)})
+			// Parent is everything but the leaf (the file itself); the model's
+			// own <Item> elements become the children.
+			parent := b.place(c.Target, c.InstancePath[:len(c.InstancePath)-1], "")
+			for _, raw := range items {
+				parent.Children = append(parent.Children, &Instance{RawXML: raw})
+			}
+
+		default:
+			// .rbxm (binary) and anything else we can't embed as XML text.
+			fmt.Fprintf(os.Stderr, "build: skipping %s (class %q): cannot embed in .rbxlx; save prefabs as .rbxmx\n", rel, c.ClassName)
 		}
 		return nil
 	})
@@ -158,11 +301,12 @@ func handleBuild(outputPath string) error {
 
 	b := NewBuilder(cfg, root)
 
-	// Pre-create the common services so they appear in a sane order.
 	for _, s := range []string{"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterPlayer"} {
 		b.service(s)
 	}
 	b.resolveTarget("StarterPlayer.StarterPlayerScripts")
+
+	b.syncBootstrap()
 
 	for _, r := range cfg.Roots {
 		absDir := filepath.Join(root, r.Dir)
