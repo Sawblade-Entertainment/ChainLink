@@ -160,6 +160,16 @@ func main() {
 			fmt.Printf("Error building: %v\n", err)
 			os.Exit(1)
 		}
+	case "run":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: chainlink run <spec> [args]")
+			os.Exit(1)
+		}
+		spec := os.Args[2]
+		if err := runToolBySpec(spec, os.Args[3:]); err != nil {
+			fmt.Printf("Error running tool %s: %v\n", spec, err)
+			os.Exit(1)
+		}
 	case "global":
 		if err := handleGlobal(); err != nil {
 			fmt.Printf("Error installing globally: %v\n", err)
@@ -174,7 +184,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, build, global, help")
+	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, build, run, global, help")
 }
 
 func createPlaceholderFile(path string, content string) error {
@@ -922,12 +932,17 @@ func proxyToTool(toolName string) error {
 		return fmt.Errorf("tool %s is not defined in chain.toml", toolName)
 	}
 
-	// Parse spec for version
+	return runToolBySpec(spec, os.Args[1:])
+}
+
+func runToolBySpec(spec string, args []string) error {
 	parts := strings.Split(spec, "@")
 	if len(parts) != 2 {
-		return fmt.Errorf("invalid tool spec for %s: %s", toolName, spec)
+		return fmt.Errorf("invalid tool spec: %s", spec)
 	}
-	tag := parts[1]
+	repo, tag := parts[0], parts[1]
+	repoParts := strings.Split(repo, "/")
+	toolName := repoParts[len(repoParts)-1]
 
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -943,7 +958,6 @@ func proxyToTool(toolName string) error {
 		}
 	}
 
-	// Find the actual binary
 	var binaryPath string
 	err = filepath.Walk(globalToolDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -957,11 +971,31 @@ func proxyToTool(toolName string) error {
 	})
 
 	if err != nil || binaryPath == "" {
-		return fmt.Errorf("could not find binary for tool %s in %s", toolName, globalToolDir)
+		// Try to install the tool if it's missing
+		fmt.Printf("Tool %s not found locally. Attempting to install...\n", toolName)
+		if installErr := InstallTool(toolName, spec); installErr != nil {
+			return fmt.Errorf("could not find binary for tool %s in %s and installation failed: %v", toolName, globalToolDir, installErr)
+		}
+
+		// Try to find the binary again after installation
+		var postInstallBinaryPath string
+		err = filepath.Walk(globalToolDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() && filepath.Ext(path) == "" {
+				postInstallBinaryPath = path
+				return filepath.SkipDir
+			}
+			return nil
+		})
+
+		if err != nil || postInstallBinaryPath == "" {
+			return fmt.Errorf("installed tool %s but could not find binary in %s", toolName, globalToolDir)
+		}
+		binaryPath = postInstallBinaryPath
 	}
 
-	// Execute the binary with passed arguments
-	args := os.Args[1:]
 	cmd := exec.Command(binaryPath, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
