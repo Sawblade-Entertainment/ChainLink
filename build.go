@@ -27,11 +27,11 @@ type Instance struct {
 }
 
 type Builder struct {
-	cfg     ProjectConfig
-	root    string
-	byPath  map[string]*Instance
-	top     []*Instance
-	nextRef int
+	cfg           ProjectConfig
+	root          string
+	byPath        map[string]*Instance
+	top           []*Instance
+	nextRef       int
 	sharedStrings map[string]string // md5 -> value
 }
 
@@ -184,7 +184,7 @@ func (b *Builder) build() []byte {
 	for _, it := range b.top {
 		writeItem(&sb, it, 1)
 	}
-	
+
 	if len(b.sharedStrings) > 0 {
 		sb.WriteString("\t<SharedStrings>\n")
 		for md5, val := range b.sharedStrings {
@@ -192,7 +192,7 @@ func (b *Builder) build() []byte {
 		}
 		sb.WriteString("\t</SharedStrings>\n")
 	}
-	
+
 	sb.WriteString("</roblox>\n")
 	return []byte(sb.String())
 }
@@ -286,12 +286,15 @@ func rawStartTag(data []byte, end int64) []byte {
 	if i < 0 {
 		return nil
 	}
-	return data[i : int(end)]
+	return data[i:int(end)]
 }
 
 // --- Build command ---
 
 func (b *Builder) syncBootstrap() {
+	if b.cfg.DisableBootstrap {
+		return
+	}
 	for _, ev := range bootstrapEvents(b.cfg) {
 		if ev.Op != "CREATE" {
 			continue
@@ -318,9 +321,6 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 		}
 		rel, _ := filepath.Rel(absDir, path)
 
-		// We need the relative path to be relative to the project root, not the root dir.
-		// Example: if absDir is "test/server", rel is "ExampleService.lua".
-		// We need "server/ExampleService.lua".
 		var rootDir string
 		for _, r := range b.cfg.Roots {
 			if filepath.Join(b.root, r.Dir) == absDir {
@@ -333,12 +333,20 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 		if rootDir != "" {
 			fullRel = rootDir + "/"
 		}
+		if fullRel != "" && !strings.HasSuffix(fullRel, "/") {
+			fullRel += "/"
+		}
 		fullRel += filepath.ToSlash(rel)
 
 		c := classify(b.cfg, fullRel, info.IsDir())
 		if !c.Syncable {
+			// Special case: if we are syncing a package and the file is not syncable
+			// according to the global config (which expects pkgPrefix), we might need to
+			// bypass classify or use a different one.
+			// However, classify uses mapPath.
 			return nil
 		}
+		// ...
 
 		if info.IsDir() {
 			b.place(c.Target, c.InstancePath, "")
@@ -429,8 +437,19 @@ func handleBuild(outputPath string) error {
 	}
 	for _, p := range cfg.Packages {
 		absDir := filepath.Join(packagesBase(), filepath.FromSlash(p.PackageName))
-		if dirExists(absDir) {
-			b.syncDir(absDir, p.Target, pkgPrefix+p.PackageName+"/")
+		if !dirExists(absDir) {
+			continue
+		}
+
+		// If there is a "src" directory, use it as the root for syncing.
+		srcDir := filepath.Join(absDir, "src")
+		if dirExists(srcDir) {
+			// Sync from src/, but treat it as the package root.
+			// We pass an empty relPrefix because the files inside src/
+			// should be mapped directly to the package target.
+			b.syncDir(srcDir, p.Target, "")
+		} else {
+			b.syncDir(absDir, p.Target, "")
 		}
 	}
 

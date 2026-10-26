@@ -2,8 +2,8 @@ package main
 
 import (
 	"embed"
-	"encoding/json"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -64,7 +64,7 @@ var bootstrapScripts = map[string]struct {
 
 type ChainToml struct {
 	Packages         map[string]string `toml:"Packages"`
-	DisableBootstrap bool              `toml:"disable_bootstrap"`
+	DisableBootstrap bool              `toml:"DisableBootstrap"`
 }
 
 // isBootstrapped reports whether a root dir is parented under an embedded init script.
