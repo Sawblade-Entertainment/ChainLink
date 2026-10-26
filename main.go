@@ -142,7 +142,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "publish":
-		if err := handlePublish(); err != nil {
+		if err := handlePublish(os.Args[2:]); err != nil {
 			fmt.Printf("Error publishing: %v\n", err)
 			os.Exit(1)
 		}
@@ -736,7 +736,13 @@ func promptGithubAuth(api, clientID string) error {
 	}
 }
 
-func handlePublish() error {
+func handlePublish(args []string) error {
+	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
+	tokenFlag := fs.String("token", "", "API token to use for publishing (overrides auth.toml)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
 	var config ChainLinkConfig
 	if _, err := toml.DecodeFile("chain.toml", &config); err != nil {
 		return fmt.Errorf("could not find chain.toml: %w", err)
@@ -793,9 +799,15 @@ func handlePublish() error {
 		api = cfg.API
 	}
 
-	token, err := getToken(api)
-	if err != nil {
-		return fmt.Errorf("authentication error: %w. Please run 'chainlink login'", err)
+	var token string
+	if *tokenFlag != "" {
+		token = *tokenFlag
+	} else {
+		var err error
+		token, err = getToken(api)
+		if err != nil {
+			return fmt.Errorf("authentication error: %w. Please run 'chainlink login' or use --token", err)
+		}
 	}
 
 	publishURL := strings.TrimSuffix(api, "/") + "/v1/publish"
