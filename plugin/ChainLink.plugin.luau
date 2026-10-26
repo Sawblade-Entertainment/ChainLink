@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 -- ChainLink Studio sync plugin
 
 local HttpService = game:GetService("HttpService")
