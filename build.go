@@ -251,7 +251,25 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 			return nil
 		}
 		rel, _ := filepath.Rel(absDir, path)
-		c := classify(b.cfg, relPrefix+filepath.ToSlash(rel), info.IsDir())
+
+		// We need the relative path to be relative to the project root, not the root dir.
+		// Example: if absDir is "test/server", rel is "ExampleService.lua".
+		// We need "server/ExampleService.lua".
+		var rootDir string
+		for _, r := range b.cfg.Roots {
+			if filepath.Join(b.root, r.Dir) == absDir {
+				rootDir = r.Dir
+				break
+			}
+		}
+
+		fullRel := relPrefix
+		if rootDir != "" {
+			fullRel = rootDir + "/"
+		}
+		fullRel += filepath.ToSlash(rel)
+
+		c := classify(b.cfg, fullRel, info.IsDir())
 		if !c.Syncable {
 			return nil
 		}
