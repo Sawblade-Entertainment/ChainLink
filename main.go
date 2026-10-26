@@ -51,6 +51,17 @@ func main() {
 
 	// If the binary name is NOT "chainlink", it means we were called via a symlink (e.g., "selene")
 	if invokedAs != "chainlink" {
+		// If the binary name starts with "chainlink-" (e.g., "chainlink-darwin-arm64"),
+		// it's likely a release binary being run for the first time.
+		// Default to global installation.
+		if strings.HasPrefix(invokedAs, "chainlink-") {
+			if err := handleGlobal(); err != nil {
+				fmt.Printf("Error installing globally: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+
 		// We are being invoked as a tool symlink
 		// Try case-insensitive match for the tool name
 		toolName := invokedAs
@@ -149,6 +160,11 @@ func main() {
 			fmt.Printf("Error building: %v\n", err)
 			os.Exit(1)
 		}
+	case "global":
+		if err := handleGlobal(); err != nil {
+			fmt.Printf("Error installing globally: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
 		printUsage()
@@ -158,7 +174,7 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, build, help")
+	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, build, global, help")
 }
 
 func createPlaceholderFile(path string, content string) error {
@@ -284,10 +300,6 @@ func handleAdd(args []string) error {
 		}
 	}
 
-	if isTool && isPackage {
-		return fmt.Errorf("cannot specify both --tool and --package")
-	}
-
 	// Heuristic: assume tool if it contains capital letters, otherwise package
 	if !isTool && !isPackage {
 		isTool = containsUppercase(spec)
@@ -353,8 +365,6 @@ func installAll() error {
 	return nil
 }
 
-// Remove the following functions entirely
-
 func writeConfig(config *ChainLinkConfig) error {
 	f, err := os.Create("chain.toml")
 	if err != nil {
@@ -362,6 +372,43 @@ func writeConfig(config *ChainLinkConfig) error {
 	}
 	defer f.Close()
 	return toml.NewEncoder(f).Encode(config)
+}
+
+func handleGlobal() error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	// We want to put it in ~/.chainlink/bin/chainlink
+	binDir := filepath.Join(home, ".chainlink", "bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return fmt.Errorf("failed to create bin directory: %w", err)
+	}
+
+	destPath := filepath.Join(binDir, "chainlink")
+
+	// Copy binary to global bin
+	input, err := os.ReadFile(exePath)
+	if err != nil {
+		return fmt.Errorf("failed to read binary: %w", err)
+	}
+	if err := os.WriteFile(destPath, input, 0755); err != nil {
+		return fmt.Errorf("failed to write binary to %s: %w", destPath, err)
+	}
+
+	fmt.Printf("Chainlink installed globally to %s\n", destPath)
+
+	if err := InstallChainlink(); err != nil {
+		fmt.Printf("Warning: failed to update PATH: %v\n", err)
+	}
+
+	return nil
 }
 
 type AuthStore struct {
@@ -655,7 +702,7 @@ func promptGithubAuth(api, clientID string) error {
 		err := postJSON(client, "https://github.com/login/oauth/access_token", map[string]string{
 			"client_id":   clientID,
 			"device_code": dc.DeviceCode,
-			"grant_type":  "urn:ietf:params:oauth:grant-type:device_code",
+			"grant_type":  "urn:ietf:params:oauth:grant-type:device-code",
 		}, &tr)
 		if err != nil {
 			return fmt.Errorf("failed to poll for access token: %w", err)
