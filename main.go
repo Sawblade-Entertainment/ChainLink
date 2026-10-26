@@ -32,6 +32,18 @@ type ChainLinkConfig struct {
 	Packages map[string]string `toml:"Packages"`
 }
 
+var (
+	ExampleController = `function ExampleController:init()
+	print("Hello world!")
+end`
+	ExampleService = `function ExampleService:init()
+	print("Hello world!")
+end`
+	ExampleData = `return {
+	hello = "world"
+}`
+)
+
 func main() {
 	// If we are called as a symlink for a tool, the first argument (os.Args[0])
 	// will be the tool name.
@@ -124,9 +136,17 @@ func main() {
 			os.Exit(1)
 		}
 	case "serve":
-
 		if err := serve(); err != nil {
 			fmt.Printf("Error serving: %v\n", err)
+			os.Exit(1)
+		}
+	case "build":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: chainlink build <output.rbxlx>")
+			os.Exit(1)
+		}
+		if err := handleBuild(os.Args[2]); err != nil {
+			fmt.Printf("Error building: %v\n", err)
 			os.Exit(1)
 		}
 	default:
@@ -138,7 +158,14 @@ func main() {
 
 func printUsage() {
 	fmt.Println("Usage: chainlink <command> [args]")
-	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, help")
+	fmt.Println("Commands: init, install, plugin, login, publish, add, remove, serve, build, help")
+}
+
+func createPlaceholderFile(path string, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0644)
 }
 
 func handleInit() error {
@@ -158,12 +185,53 @@ func handleInit() error {
 	}
 
 	fmt.Println("Creating chain.toml...")
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current working directory: %w", err)
+	}
+	folderName := filepath.Base(cwd)
+
 	config := ChainLinkConfig{
+		Package: PackageInfo{
+			Name:    folderName,
+			Version: "0.1.0",
+		},
 		Tools:    make(map[string]string),
 		Packages: make(map[string]string),
 	}
 
-	return writeConfig(&config)
+	if err := writeConfig(&config); err != nil {
+		return err
+	}
+
+	// 3. Create project structure
+	fmt.Println("Creating project structure...")
+
+	// Client: ExampleController
+	if err := os.MkdirAll("client", 0755); err != nil {
+		return fmt.Errorf("failed to create directory client: %w", err)
+	}
+	if err := createPlaceholderFile(filepath.Join("client", "ExampleController.lua"), ExampleController); err != nil {
+		return err
+	}
+
+	// Server: ExampleService
+	if err := os.MkdirAll("server", 0755); err != nil {
+		return fmt.Errorf("failed to create directory server: %w", err)
+	}
+	if err := createPlaceholderFile(filepath.Join("server", "ExampleService.lua"), ExampleService); err != nil {
+		return err
+	}
+
+	// Shared: ExampleData
+	if err := os.MkdirAll("shared", 0755); err != nil {
+		return fmt.Errorf("failed to create directory shared: %w", err)
+	}
+	if err := createPlaceholderFile(filepath.Join("shared", "ExampleData.lua"), ExampleData); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func handleRemove(name string) error {

@@ -1,4 +1,6 @@
 --!strict
+--!native
+--!optimize 2
 -- Server Bootstrapper
 -- Requires every child ModuleScript and drives its lifecycle:
 --   :init()                              -- called once on every module before any :start()
@@ -17,7 +19,7 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 
-local LOG_PREFIX = "[Bootstrap:Server]"
+local LOG_PREFIX = "[ SERVER ]"
 local CLOSE_TIMEOUT = 25 -- seconds; Roblox kills the server after ~30s
 
 type Module = { [any]: any }

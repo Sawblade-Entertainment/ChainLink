@@ -17,7 +17,7 @@
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
-local LOG_PREFIX = "[Bootstrap]"
+local LOG_PREFIX = "[ CLIENT ]"
 
 type Module = { [any]: any }
 type Entry = { name: string, module: Module, priority: number }
