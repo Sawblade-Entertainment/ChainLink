@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"net/http"
@@ -239,6 +240,8 @@ type Event struct {
 	InstancePath []string `json:"instancePath"`
 	ClassName    string   `json:"className,omitempty"`
 	Source       string   `json:"source,omitempty"`
+	ModelData    string   `json:"modelData,omitempty"` // base64-encoded model bytes
+	ModelFormat  string   `json:"modelFormat,omitempty"`
 	KeepChildren bool     `json:"keepChildren,omitempty"`
 }
 
@@ -543,11 +546,10 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 		}
 	}
 	if strings.HasSuffix(lower, ".rbxmx") || strings.HasSuffix(lower, ".rbxm") {
-		data, err := os.ReadFile(s.absPath(rel))
-		if err != nil {
-			return Event{}, false
-		}
-		ev.Source = string(data)
+		// Model bytes are not script text: base64 preserves binary .rbxm bytes
+		// across the JSON/HTTP boundary without invalid-UTF8 replacement.
+		ev.ModelData = base64.StdEncoding.EncodeToString(data)
+		ev.ModelFormat = strings.TrimPrefix(strings.ToLower(filepath.Ext(rel)), ".")
 		return ev, true
 	}
 	ev.Source = source

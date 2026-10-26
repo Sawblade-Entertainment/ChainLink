@@ -5,6 +5,7 @@
 
 local HttpService = game:GetService("HttpService")
 local ScriptEditorService = game:GetService("ScriptEditorService")
+local SerializationService = game:GetService("SerializationService")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
 local ATTR = "ChainLinkPath"
@@ -394,8 +395,60 @@ local function replaceInstance(old, newClass)
     return new
 end
 
-local function setSource(inst, source)
-    if inst:IsA("LuaSourceContainer") then
+local BASE64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+local function decodeBase64(data: string): string
+    local output = table.create(math.floor(#data * 3 / 4))
+    local outCount = 0
+    for i = 1, #data, 4 do
+        local a = string.find(BASE64, string.sub(data, i, i), 1, true)
+        local b = string.find(BASE64, string.sub(data, i + 1, i + 1), 1, true)
+        local cChar = string.sub(data, i + 2, i + 2)
+        local dChar = string.sub(data, i + 3, i + 3)
+        local c = cChar == "=" and 1 or string.find(BASE64, cChar, 1, true)
+        local d = dChar == "=" and 1 or string.find(BASE64, dChar, 1, true)
+        if not a or not b or not c or not d then
+            error("invalid base64 model payload")
+        end
+        a -= 1
+        b -= 1
+        c -= 1
+        d -= 1
+        outCount += 1
+        output[outCount] = string.char(a * 4 + math.floor(b / 16))
+        if cChar ~= "=" then
+            outCount += 1
+            output[outCount] = string.char((b % 16) * 16 + math.floor(c / 4))
+        end
+        if dChar ~= "=" then
+            outCount += 1
+            output[outCount] = string.char((c % 4) * 64 + d)
+        end
+    end
+    return table.concat(output, "", 1, outCount)
+end
+
+local function setModel(inst, ev)
+    if ev.modelFormat ~= "rbxm" then
+        error(".rbxmx sync payload is XML; convert the model to .rbxm for automatic Studio insertion")
+    end
+    local bytes = decodeBase64(ev.modelData)
+    local imported = SerializationService:DeserializeInstancesAsync(buffer.fromstring(bytes))
+    for _, child in inst:GetChildren() do
+        child:Destroy()
+    end
+    for _, item in imported do
+        item.Parent = inst
+    end
+end
+
+local function setSource(inst, source, ev)
+    if ev and ev.modelData then
+        if not inst:IsA("Model") then
+            error("model file did not resolve to a Model instance")
+        end
+        setModel(inst, ev)
+    elseif inst:IsA("LuaSourceContainer") then
         local ok = pcall(function()
             ScriptEditorService:UpdateSourceAsync(inst, function()
                 return source
@@ -406,22 +459,8 @@ local function setSource(inst, source)
         end
     elseif inst:IsA("StringValue") then
         inst.Value = source
-    elseif inst:IsA("Model") and source ~= "" then
-        -- Attempt to import the prefab content.
-        -- Since Studio plugins cannot directly read local files, 
-        -- we assume the 'source' contains the XML/Binary data sent by the server.
-        -- Note: There is no direct 'InsertXML' API for plugins, 
-        -- but we can use the provided source if we implement a parser 
-        -- or rely on the user importing it.
-        -- However, for .rbxmx, we could potentially use a trick or 
-        -- notify the user.
-        
-        -- For now, let's at least ensure the source is stored as an attribute 
-        -- so we know what it is, or we can attempt to use a custom import mechanism.
-        inst:SetAttribute("ChainLinkPrefabSource", source)
     end
 end
-
 -- ---------- Applying events ----------
 
 local function applyCreateOrUpdate(ev)
@@ -449,7 +488,10 @@ local function applyCreateOrUpdate(ev)
     end
     inst:SetAttribute(ATTR, key)
     instanceCache[key] = inst
-    setSource(inst, ev.source or "")
+    local ok, err = pcall(setSource, inst, ev.source or "", ev)
+    if not ok then
+        logLine("Model/source import failed: " .. tostring(err), "error")
+    end
 end
 
 local function applyDelete(ev)

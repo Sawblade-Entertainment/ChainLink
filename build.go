@@ -138,11 +138,15 @@ func isIllegalXML(r rune) bool {
 }
 
 func escText(s string) string {
-	return strings.NewReplacer("&", "&", "<", "<", ">", ">").Replace(sanitize(s))
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(sanitize(s)))
+	return b.String()
 }
 
 func escAttr(s string) string {
-	return strings.NewReplacer("&", "&", "<", "<", ">", ">", `"`, "\"").Replace(sanitize(s))
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(sanitize(s)))
+	return strings.ReplaceAll(b.String(), "\"", "&quot;")
 }
 
 // cdata wraps s in a CDATA section, splitting on any "]]>" so it can't terminate early.
@@ -204,6 +208,9 @@ func extractItems(data []byte) ([]string, error) {
 	for {
 		tok, err := dec.Token()
 		if err != nil {
+			if err != io.EOF {
+				return nil, err
+			}
 			break
 		}
 		switch t := tok.(type) {
@@ -371,7 +378,7 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 			inst := b.place(c.Target, c.InstancePath, c.ClassName)
 			setSource(inst, source)
 
-		case strings.HasSuffix(path, ".rbxmx"):
+		case strings.EqualFold(filepath.Ext(path), ".rbxmx"):
 			if err := extractSharedStrings(data, b.sharedStrings); err != nil {
 				fmt.Fprintf(os.Stderr, "build: error extracting shared strings from %s: %v\n", rel, err)
 			}
@@ -380,16 +387,19 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 				fmt.Fprintf(os.Stderr, "build: skipping %s: %v\n", rel, err)
 				return nil
 			}
-			// Parent is everything but the leaf (the file itself); the model's
-			// own <Item> elements become the children.
-			parent := b.place(c.Target, c.InstancePath[:len(c.InstancePath)-1], "")
+			// Preserve the mapped filename as a Model, with the imported model
+			// tree nested beneath that node.
+			model := b.place(c.Target, c.InstancePath, "Model")
+			model.Class = "Model" // upgrade if a same-name folder was visited first
 			for _, raw := range items {
-				parent.Children = append(parent.Children, &Instance{RawXML: raw})
+				model.Children = append(model.Children, &Instance{RawXML: raw})
 			}
 
+		case strings.EqualFold(filepath.Ext(path), ".rbxm"):
+			fmt.Fprintf(os.Stderr, "build: skipping %s: binary .rbxm cannot be embedded in XML .rbxlx; convert it to .rbxmx for build output\n", rel)
+
 		default:
-			// .rbxm (binary) and anything else we can't embed as XML text.
-			fmt.Fprintf(os.Stderr, "build: skipping %s (class %q): cannot embed in .rbxlx; save prefabs as .rbxmx\n", rel, c.ClassName)
+			fmt.Fprintf(os.Stderr, "build: skipping %s (unsupported class %q)\n", rel, c.ClassName)
 		}
 		return nil
 	})
@@ -420,7 +430,7 @@ func handleBuild(outputPath string) error {
 	for _, p := range cfg.Packages {
 		absDir := filepath.Join(packagesBase(), filepath.FromSlash(p.PackageName))
 		if dirExists(absDir) {
-			b.syncDir(absDir, p.Target, pkgPrefix)
+			b.syncDir(absDir, p.Target, pkgPrefix+p.PackageName+"/")
 		}
 	}
 
