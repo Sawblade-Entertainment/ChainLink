@@ -381,6 +381,8 @@ func classify(cfg ProjectConfig, rel string, isDir bool) Classified {
 		class = "ModuleScript"
 	case ".txt":
 		class = "StringValue"
+	case ".rbxmx", ".rbxm":
+		class = "Model"
 	default:
 		return Classified{}
 	}
@@ -539,6 +541,14 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 		} else {
 			source = "return " + jsonToLuau(parsed)
 		}
+	}
+	if strings.HasSuffix(lower, ".rbxmx") || strings.HasSuffix(lower, ".rbxm") {
+		data, err := os.ReadFile(s.absPath(rel))
+		if err != nil {
+			return Event{}, false
+		}
+		ev.Source = string(data)
+		return ev, true
 	}
 	ev.Source = source
 	return ev, true

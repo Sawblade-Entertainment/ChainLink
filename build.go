@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,10 +32,17 @@ type Builder struct {
 	byPath  map[string]*Instance
 	top     []*Instance
 	nextRef int
+	sharedStrings map[string]string // md5 -> value
 }
 
 func NewBuilder(cfg ProjectConfig, root string) *Builder {
-	return &Builder{cfg: cfg, root: root, byPath: map[string]*Instance{}, nextRef: 1}
+	return &Builder{
+		cfg:           cfg,
+		root:          root,
+		byPath:        map[string]*Instance{},
+		sharedStrings: map[string]string{},
+		nextRef:       1,
+	}
 }
 
 func (b *Builder) newReferent() string {
@@ -172,6 +180,15 @@ func (b *Builder) build() []byte {
 	for _, it := range b.top {
 		writeItem(&sb, it, 1)
 	}
+	
+	if len(b.sharedStrings) > 0 {
+		sb.WriteString("\t<SharedStrings>\n")
+		for md5, val := range b.sharedStrings {
+			fmt.Fprintf(&sb, "\t\t<SharedString md5=\"%s\">%s</SharedString>\n", escAttr(md5), escText(val))
+		}
+		sb.WriteString("\t</SharedStrings>\n")
+	}
+	
 	sb.WriteString("</roblox>\n")
 	return []byte(sb.String())
 }
@@ -212,6 +229,47 @@ func extractItems(data []byte) ([]string, error) {
 	return items, nil
 }
 
+// extractSharedStrings pulls the <SharedStrings> section from an .rbxmx file.
+func extractSharedStrings(data []byte, shared map[string]string) error {
+	dec := xml.NewDecoder(strings.NewReader(string(data)))
+	var inSharedStrings bool
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "SharedStrings" {
+				inSharedStrings = true
+			} else if inSharedStrings && t.Name.Local == "SharedString" {
+				var md5 string
+				for _, attr := range t.Attr {
+					if attr.Name.Local == "md5" {
+						md5 = attr.Value
+						break
+					}
+				}
+				var val string
+				if err := dec.DecodeElement(&val, &t); err != nil {
+					return err
+				}
+				if md5 != "" {
+					shared[md5] = val
+				}
+			}
+		case xml.EndElement:
+			if t.Name.Local == "SharedStrings" {
+				inSharedStrings = false
+			}
+		}
+	}
+	return nil
+}
+
 // rawStartTag returns the bytes of the start tag that ends at offset `end`.
 func rawStartTag(data []byte, end int64) []byte {
 	i := int(end) - 1
@@ -221,7 +279,7 @@ func rawStartTag(data []byte, end int64) []byte {
 	if i < 0 {
 		return nil
 	}
-	return data[i:int(end)]
+	return data[i : int(end)]
 }
 
 // --- Build command ---
@@ -314,6 +372,9 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 			setSource(inst, source)
 
 		case strings.HasSuffix(path, ".rbxmx"):
+			if err := extractSharedStrings(data, b.sharedStrings); err != nil {
+				fmt.Fprintf(os.Stderr, "build: error extracting shared strings from %s: %v\n", rel, err)
+			}
 			items, err := extractItems(data)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "build: skipping %s: %v\n", rel, err)

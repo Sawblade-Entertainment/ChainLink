@@ -406,6 +406,19 @@ local function setSource(inst, source)
         end
     elseif inst:IsA("StringValue") then
         inst.Value = source
+    elseif inst:IsA("Model") and source ~= "" then
+        -- Attempt to import the prefab content.
+        -- Since Studio plugins cannot directly read local files, 
+        -- we assume the 'source' contains the XML/Binary data sent by the server.
+        -- Note: There is no direct 'InsertXML' API for plugins, 
+        -- but we can use the provided source if we implement a parser 
+        -- or rely on the user importing it.
+        -- However, for .rbxmx, we could potentially use a trick or 
+        -- notify the user.
+        
+        -- For now, let's at least ensure the source is stored as an attribute 
+        -- so we know what it is, or we can attempt to use a custom import mechanism.
+        inst:SetAttribute("ChainLinkPrefabSource", source)
     end
 end
 
