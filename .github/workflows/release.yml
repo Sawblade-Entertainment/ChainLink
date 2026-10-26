@@ -75,26 +75,15 @@ jobs:
 
       - name: Prepare release assets
         run: |
-          mkdir release
-          # Process the downloaded artifacts
-          # artifacts/build-linux-amd64/chainlink
-          # artifacts/build-windows-amd64/chainlink.exe
-          # etc.
-          find artifacts -type f -name "chainlink*" -exec cp {} release/ \;
-
-          # Rename files to include platform.
-          # download-artifact v4 preserves folder structure:
-          # artifacts/<artifact-name>/...
-
-          # Example:
-          # build-linux-amd64/chainlink -> release/chainlink-linux-amd64
-
           rm -rf release
           mkdir release
           for dir in artifacts/build-*; do
-            platform=$(basename $dir | sed 's/build-//')
-            file=$(ls $dir/chainlink*)
-            cp "$dir/$file" "release/chainlink-$platform"
+            [ -d "$dir" ] || continue
+            platform=$(basename "$dir" | sed 's/build-//')
+            file=$(find "$dir" -type f -name "chainlink*" | head -n 1)
+            if [ -n "$file" ]; then
+              cp "$file" "release/chainlink-$platform"
+            fi
           done
 
       - name: Create GitHub Release
