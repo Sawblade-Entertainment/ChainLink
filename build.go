@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -284,10 +285,33 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 			return nil
 		}
 
+		source := string(data)
+		lower := strings.ToLower(fullRel)
+		if strings.HasSuffix(lower, ".luau") || strings.HasSuffix(lower, ".lua") {
+			if !b.cfg.DisableBootstrap && (strings.Contains(fullRel, "Controller.lua") || strings.Contains(fullRel, "Service.lua")) {
+				parts := strings.Split(fullRel, "/")
+				modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
+
+				source = fmt.Sprintf("local %s = {}\n", modName) +
+					source +
+					fmt.Sprintf("\nreturn %s", modName)
+			}
+
+			source = addLuauHeader(source)
+		}
+		if strings.HasSuffix(lower, ".json") {
+			var parsed any
+			if err := json.Unmarshal([]byte(source), &parsed); err != nil {
+				source = "return " + source
+			} else {
+				source = "return " + jsonToLuau(parsed)
+			}
+		}
+
 		switch {
 		case isScriptClass(c.ClassName):
 			inst := b.place(c.Target, c.InstancePath, c.ClassName)
-			setSource(inst, string(data))
+			setSource(inst, source)
 
 		case strings.HasSuffix(path, ".rbxmx"):
 			items, err := extractItems(data)
