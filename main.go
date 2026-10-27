@@ -22,8 +22,11 @@ import (
 )
 
 type PackageInfo struct {
-	Name    string
-	Version string
+	Name        string
+	Version     string
+	License     string
+	Description string
+	Website     string
 }
 
 type ChainLinkConfig struct {
@@ -781,7 +784,22 @@ func handlePublish(args []string) error {
 	// Fetch the registry from the project's config to include it in the manifest
 	registry := projectRegistry(".")
 
-	wallyToml := fmt.Sprintf("[package]\nname = \"%s\"\nversion = \"%s\"\nregistry = \"%s\"\nrealm = \"shared\"\n", config.Package.Name, config.Package.Version, registry)
+	wallyToml := fmt.Sprintf(`[package]
+name = "%s"
+version = "%s"
+registry = "%s"
+license = "%s"
+description = "%s"
+homepage = "%s"
+realm = "shared"
+`,
+		config.Package.Name,
+		config.Package.Version,
+		registry,
+		config.Package.License,
+		config.Package.Description,
+		config.Package.Website,
+	)
 	if err := os.WriteFile(filepath.Join(tmpDir, "wally.toml"), []byte(wallyToml), 0644); err != nil {
 		return fmt.Errorf("failed to create wally.toml: %w", err)
 	}
