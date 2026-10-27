@@ -5,7 +5,7 @@ ChainLink is a tool manager for Roblox development, allowing you to easily manag
 ## Installation
 
 ### From Releases
-Download the binary for your platform from the [Releases](https://github.com/Sawblade/ChainLink/releases) page.
+Download the binary for your platform from the [Releases](https://github.com/Sawblade-Entertainment/ChainLink/releases) page.
 
 ### From Source
 ```bash
@@ -19,6 +19,10 @@ ChainLink uses a `chain.toml` file in your project root to track dependencies.
 ### Basic Commands
 
 ```bash
+# Initialize a new ChainLink project
+# Creates chain.toml and a basic project structure (client/, server/, shared/)
+chainlink init
+
 # Install all tools and packages defined in chain.toml
 chainlink install
 
@@ -36,8 +40,20 @@ chainlink add scope/name@version --package
 # Remove a tool or package
 chainlink remove name
 
+# Run a tool by its specification directly
+chainlink run owner/repo@tag [args]
+
 # Start the ChainLink server
 chainlink serve
+
+# Install ChainLink globally to your system
+chainlink global
+
+# Authenticate with a registry to publish packages
+chainlink login
+
+# Publish the current project as a package to a registry
+chainlink publish
 
 # Show help
 chainlink help
@@ -51,6 +67,9 @@ The `chain.toml` file is structured as follows:
 [Package]
 Name = "MyProject"
 Version = "1.0.0"
+License = "MIT"
+Description = "A great project"
+Website = "https://example.com"
 
 [Tools]
 selene = "Kampfkarren/selene@0.32.0"
