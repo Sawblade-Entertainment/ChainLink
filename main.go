@@ -172,7 +172,14 @@ func main() {
 			os.Exit(1)
 		}
 	case "sourcemap":
-		if err := handleSourcemap(""); err != nil {
+		outputPath := ""
+		for i := 2; i < len(os.Args); i++ {
+			if os.Args[i] == "-o" && i+1 < len(os.Args) {
+				outputPath = os.Args[i+1]
+				break
+			}
+		}
+		if err := handleSourcemap(outputPath); err != nil {
 			fmt.Printf("Error generating sourcemap: %v\n", err)
 			os.Exit(1)
 		}
