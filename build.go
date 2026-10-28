@@ -315,6 +315,27 @@ func isScriptClass(c string) bool {
 	return false
 }
 
+func parseScript(cfg ProjectConfig, source string, fullRel string) string {
+	if !cfg.DisableBootstrap && (strings.Contains(fullRel, "Controller.lua") || strings.Contains(fullRel, "Service.lua")) {
+		parts := strings.Split(fullRel, "/")
+		modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
+
+		source = fmt.Sprintf("local %s = {}\n", modName) +
+			strings.ReplaceAll(
+				strings.ReplaceAll(
+					source,
+					"function mod.",
+					"function "+modName+".",
+				),
+				"function mod:",
+				"function "+modName+":",
+			) +
+			fmt.Sprintf("\nreturn %s", modName)
+	}
+
+	return addLuauHeader(source)
+}
+
 func (b *Builder) syncDir(absDir, target, relPrefix string) {
 	b.resolveTarget(target)
 
@@ -364,26 +385,8 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 		source := string(data)
 		lower := strings.ToLower(fullRel)
 		if strings.HasSuffix(lower, ".luau") || strings.HasSuffix(lower, ".lua") {
-			if !b.cfg.DisableBootstrap && (strings.Contains(fullRel, "Controller.lua") || strings.Contains(fullRel, "Service.lua")) {
-				parts := strings.Split(fullRel, "/")
-				modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
-
-				source = fmt.Sprintf("local %s = {}\n", modName) +
-					strings.ReplaceAll(
-						strings.ReplaceAll(
-							source,
-							"function mod.",
-							"function "+modName+".",
-						),
-						"function mod:",
-						"function "+modName+":",
-					) +
-					fmt.Sprintf("\nreturn %s", modName)
-			}
-
-			source = addLuauHeader(source)
-		}
-		if strings.HasSuffix(lower, ".json") {
+			source = parseScript(b.cfg, source, fullRel)
+		} else if strings.HasSuffix(lower, ".json") {
 			var parsed any
 			if err := json.Unmarshal([]byte(source), &parsed); err != nil {
 				source = "return " + source

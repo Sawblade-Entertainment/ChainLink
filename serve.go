@@ -526,20 +526,7 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 	source := string(data)
 	lower := strings.ToLower(rel)
 	if strings.HasSuffix(lower, ".luau") || strings.HasSuffix(lower, ".lua") {
-		if !cfg.DisableBootstrap && (strings.Contains(rel, "Controller.lua") || strings.Contains(rel, "Service.lua")) {
-			parts := strings.Split(rel, "/")
-			modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
-
-			source = fmt.Sprintf("local %s = {}\n", modName) +
-				strings.ReplaceAll(
-					strings.ReplaceAll(source, "mod.", modName+"."),
-					"mod:",
-					modName+":",
-				) +
-				fmt.Sprintf("\nreturn %s", modName)
-		}
-
-		source = addLuauHeader(source)
+		source = parseScript(cfg, source, lower)
 	}
 	if strings.HasSuffix(lower, ".json") {
 		var parsed any
