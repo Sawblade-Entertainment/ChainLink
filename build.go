@@ -37,6 +37,14 @@ type Builder struct {
 	sourcemap     map[string]string // roblox_path -> local_path
 }
 
+var InjectGlobals = `local __clOldRequireGlob = require
+function require(m)
+	if type(m) == "string" and m:sub(1,1) ~= "." and m:sub(1,1) ~= "@" then
+		m = game.ReplicatedStorage:WaitForChild("packages"):WaitForChild(m)
+	end
+	return __clOldRequireGlob(m)
+end`
+
 func NewBuilder(cfg ProjectConfig, root string) *Builder {
 	return &Builder{
 		cfg:           cfg,
@@ -317,20 +325,9 @@ func isScriptClass(c string) bool {
 
 func parseScript(cfg ProjectConfig, source string, fullRel string) string {
 	if !cfg.DisableBootstrap && (strings.Contains(fullRel, "Controller.lua") || strings.Contains(fullRel, "Service.lua")) {
-		parts := strings.Split(fullRel, "/")
-		modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
-
-		source = fmt.Sprintf("local %s = {}\n", modName) +
-			strings.ReplaceAll(
-				strings.ReplaceAll(
-					source,
-					"function mod.",
-					"function "+modName+".",
-				),
-				"function mod:",
-				"function "+modName+":",
-			) +
-			fmt.Sprintf("\nreturn %s", modName)
+		source = InjectGlobals + "\nlocal mod = {}\n" +
+			strings.ReplaceAll(source, "\n\n", "\n") +
+			"\nreturn mod"
 	}
 
 	return addLuauHeader(source)

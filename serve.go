@@ -526,7 +526,7 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 	source := string(data)
 	lower := strings.ToLower(rel)
 	if strings.HasSuffix(lower, ".luau") || strings.HasSuffix(lower, ".lua") {
-		source = parseScript(cfg, source, lower)
+		source = parseScript(cfg, source, rel)
 	}
 	if strings.HasSuffix(lower, ".json") {
 		var parsed any
