@@ -329,12 +329,12 @@ func isScriptClass(c string) bool {
 
 func parseScript(cfg ProjectConfig, source string, fullRel string) string {
 	if !cfg.DisableBootstrap && (strings.Contains(fullRel, "Controller.lua") || strings.Contains(fullRel, "Service.lua")) {
-		source = InjectGlobals + "\nlocal mod = {}\n" +
+		source = "local mod = {}\n" +
 			strings.ReplaceAll(source, "\n\n", "\n") +
 			"\nreturn mod"
 	}
 
-	return addLuauHeader(source)
+	return addLuauHeader(InjectGlobals + "\n" + source)
 }
 
 func (b *Builder) syncDir(absDir, target, relPrefix string) {
