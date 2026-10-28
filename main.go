@@ -171,7 +171,13 @@ func main() {
 			fmt.Printf("Error building: %v\n", err)
 			os.Exit(1)
 		}
+	case "sourcemap":
+		if err := handleSourcemap(""); err != nil {
+			fmt.Printf("Error generating sourcemap: %v\n", err)
+			os.Exit(1)
+		}
 	case "run":
+
 		if len(os.Args) < 3 {
 			fmt.Println("Usage: chainlink run <spec> [args]")
 			os.Exit(1)

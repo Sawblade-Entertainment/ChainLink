@@ -24,6 +24,7 @@ type Instance struct {
 	Props    []Property
 	Children []*Instance
 	RawXML   string // pre-serialized <Item>…</Item> subtree (from .rbxmx prefabs)
+	FilePath string // Local path to the source file
 }
 
 type Builder struct {
@@ -33,6 +34,7 @@ type Builder struct {
 	top           []*Instance
 	nextRef       int
 	sharedStrings map[string]string // md5 -> value
+	sourcemap     map[string]string // roblox_path -> local_path
 }
 
 func NewBuilder(cfg ProjectConfig, root string) *Builder {
@@ -41,6 +43,7 @@ func NewBuilder(cfg ProjectConfig, root string) *Builder {
 		root:          root,
 		byPath:        map[string]*Instance{},
 		sharedStrings: map[string]string{},
+		sourcemap:     map[string]string{},
 		nextRef:       1,
 	}
 }
@@ -393,6 +396,8 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 		case isScriptClass(c.ClassName):
 			inst := b.place(c.Target, c.InstancePath, c.ClassName)
 			setSource(inst, source)
+			b.sourcemap[c.Target] = path
+			inst.FilePath = path
 
 		case strings.EqualFold(filepath.Ext(path), ".rbxmx"):
 			if err := extractSharedStrings(data, b.sharedStrings); err != nil {
