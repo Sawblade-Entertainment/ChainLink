@@ -48,11 +48,14 @@ end`
 	VSCodeSettings = `{
     "luau-lsp.sourcemap.rojoPath": "chainlink",
     "luau-lsp.sourcemap.rojoProjectFile": "chain.toml",
+	"luau-lsp.sourcemap.useVSCodeWatcher": true,
     "luau-lsp.types.definitionFiles": [
         ".vscode/globals.d.luau"
     ]
 }`
-	VSCodeGlobals = `declare mod: any`
+	VSCodeGlobals = `declare mod: any
+declare require: (module: any) -> any
+declare module: any`
 )
 
 func main() {
