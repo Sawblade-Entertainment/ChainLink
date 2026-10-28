@@ -532,13 +532,9 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 
 			source = fmt.Sprintf("local %s = {}\n", modName) +
 				strings.ReplaceAll(
-					strings.ReplaceAll(
-						source,
-						"function self.",
-						"function "+modName+".",
-					),
-					"function self:",
-					"function "+modName+":",
+					strings.ReplaceAll(source, "mod.", modName+"."),
+					"mod:",
+					modName+":",
 				) +
 				fmt.Sprintf("\nreturn %s", modName)
 		}

@@ -372,10 +372,10 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 					strings.ReplaceAll(
 						strings.ReplaceAll(
 							source,
-							"function self.",
+							"function mod.",
 							"function "+modName+".",
 						),
-						"function self:",
+						"function mod:",
 						"function "+modName+":",
 					) +
 					fmt.Sprintf("\nreturn %s", modName)
