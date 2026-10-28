@@ -40,7 +40,11 @@ type Builder struct {
 var InjectGlobals = `local __clOldRequireGlob = require
 function require(m)
 	if type(m) == "string" and m:sub(1,1) ~= "." and m:sub(1,1) ~= "@" then
-		m = game.ReplicatedStorage:WaitForChild("packages"):WaitForChild(m)
+		if string.lower(m) == m then
+			m = game.ReplicatedStorage:WaitForChild("packages"):WaitForChild(m)
+		else
+			return game:GetService(m)
+		end
 	end
 	return __clOldRequireGlob(m)
 end`
