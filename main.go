@@ -36,15 +36,23 @@ type ChainLinkConfig struct {
 }
 
 var (
-	ExampleController = `function ExampleController:init()
+	ExampleController = `function mod:init()
 	print("Hello world!")
 end`
-	ExampleService = `function ExampleService:init()
+	ExampleService = `function mod:init()
 	print("Hello world!")
 end`
-	ExampleData = `return {
-	hello = "world"
+	ExampleData = `{
+	"hello": "world"
 }`
+	VSCodeSettings = `{
+    "luau-lsp.sourcemap.rojoPath": "chainlink",
+    "luau-lsp.sourcemap.rojoProjectFile": "chain.toml",
+    "luau-lsp.types.definitionFiles": [
+        ".vscode/globals.d.luau"
+    ]
+}`
+	VSCodeGlobals = `declare mod: any`
 )
 
 func main() {
@@ -240,7 +248,7 @@ func handleInit() error {
 	if err := os.MkdirAll("client", 0755); err != nil {
 		return fmt.Errorf("failed to create directory client: %w", err)
 	}
-	if err := createPlaceholderFile(filepath.Join("client", "ExampleController.lua"), ExampleController); err != nil {
+	if err := createPlaceholderFile(filepath.Join("client", "ExampleController.luau"), ExampleController); err != nil {
 		return err
 	}
 
@@ -248,7 +256,7 @@ func handleInit() error {
 	if err := os.MkdirAll("server", 0755); err != nil {
 		return fmt.Errorf("failed to create directory server: %w", err)
 	}
-	if err := createPlaceholderFile(filepath.Join("server", "ExampleService.lua"), ExampleService); err != nil {
+	if err := createPlaceholderFile(filepath.Join("server", "ExampleService.luau"), ExampleService); err != nil {
 		return err
 	}
 
@@ -256,7 +264,15 @@ func handleInit() error {
 	if err := os.MkdirAll("shared", 0755); err != nil {
 		return fmt.Errorf("failed to create directory shared: %w", err)
 	}
-	if err := createPlaceholderFile(filepath.Join("shared", "ExampleData.lua"), ExampleData); err != nil {
+	if err := createPlaceholderFile(filepath.Join("shared", "ExampleData.json"), ExampleData); err != nil {
+		return err
+	}
+
+	// VSCode configuration
+	if err := createPlaceholderFile(filepath.Join(".vscode", "settings.json"), VSCodeSettings); err != nil {
+		return err
+	}
+	if err := createPlaceholderFile(filepath.Join(".vscode", "globals.d.luau"), VSCodeGlobals); err != nil {
 		return err
 	}
 

@@ -366,7 +366,15 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 				modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
 
 				source = fmt.Sprintf("local %s = {}\n", modName) +
-					source +
+					strings.ReplaceAll(
+						strings.ReplaceAll(
+							source,
+							"function self.",
+							"function "+modName+".",
+						),
+						"function self:",
+						"function "+modName+":",
+					) +
 					fmt.Sprintf("\nreturn %s", modName)
 			}
 

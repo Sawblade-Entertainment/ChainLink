@@ -531,7 +531,15 @@ func (s *Server) fileEvent(rel string, op string) (Event, bool) {
 			modName := strings.TrimSuffix(strings.TrimSuffix(parts[len(parts)-1], ".luau"), ".lua")
 
 			source = fmt.Sprintf("local %s = {}\n", modName) +
-				source +
+				strings.ReplaceAll(
+					strings.ReplaceAll(
+						source,
+						"function self.",
+						"function "+modName+".",
+					),
+					"function self:",
+					"function "+modName+":",
+				) +
 				fmt.Sprintf("\nreturn %s", modName)
 		}
 
