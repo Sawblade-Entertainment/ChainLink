@@ -115,6 +115,9 @@ func (b *Builder) place(target string, instancePath []string, leafClass string) 
 }
 
 func setSource(inst *Instance, src string) {
+	if !isScriptClass(inst.Class) {
+		inst.Class = "ModuleScript"
+	}
 	for i := range inst.Props {
 		if inst.Props[i].Name == "Source" {
 			inst.Props[i].Value = src
@@ -355,8 +358,14 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 		}
 
 		fullRel := relPrefix
+		isPackage := strings.Contains(absDir, filepath.Join(packagesBase(), ""))
 		if rootDir != "" {
 			fullRel = rootDir + "/"
+		} else if isPackage {
+			// If we are in a package directory, use the package prefix
+			// We need the package name relative to the packages base
+			pkgRel, _ := filepath.Rel(packagesBase(), absDir)
+			fullRel = pkgPrefix + filepath.ToSlash(pkgRel) + "/"
 		}
 		if fullRel != "" && !strings.HasSuffix(fullRel, "/") {
 			fullRel += "/"
@@ -371,7 +380,6 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 			// However, classify uses mapPath.
 			return nil
 		}
-		// ...
 
 		if info.IsDir() {
 			b.place(c.Target, c.InstancePath, "")
@@ -385,7 +393,7 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 
 		source := string(data)
 		lower := strings.ToLower(fullRel)
-		if strings.HasSuffix(lower, ".luau") || strings.HasSuffix(lower, ".lua") {
+		if (strings.HasSuffix(lower, ".luau") || strings.HasSuffix(lower, ".lua")) && !isPackage {
 			source = parseScript(b.cfg, source, fullRel)
 		} else if strings.HasSuffix(lower, ".json") {
 			var parsed any
