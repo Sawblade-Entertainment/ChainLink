@@ -34,7 +34,7 @@ local function themed(fn: () -> ())
     fn()
 end
 
-local function color(c: Enum.StudioStyleGuideColor, m: Enum.StudioStyleGuideModifier?): Color3
+local function color(c, m): Color3
     return Studio.Theme:GetColor(c, m or SGM.Default)
 end
 
@@ -56,7 +56,7 @@ local widget = plugin:CreateDockWidgetPluginGuiAsync(
 )
 widget.Title = "ChainLink"
 
-local function make(class: string, props: { [string]: any }, parent: Instance?): any
+local function make(class: string, props: { [string]: any }, parent): any
     local inst = Instance.new(class)
     for k, v in props do
         (inst :: any)[k] = v
@@ -275,7 +275,7 @@ local function levelColor(level: LogLevel): Color3
 end
 
 local logCount = 0
-local function logLine(msg: string, level: LogLevel?)
+local function logLine(msg: string, level): any
     logCount += 1
     local lvl: LogLevel = level or "info"
     local line = make("TextLabel", {
@@ -428,12 +428,280 @@ local function decodeBase64(data: string): string
     return table.concat(output, "", 1, outCount)
 end
 
+local function xmlDecode(text: string): string
+    text = string.gsub(text, "&#x([%da-fA-F]+);", function(hex)
+        local n = tonumber(hex, 16)
+        return n and utf8.char(n) or ""
+    end)
+    text = string.gsub(text, "&#(%d+);", function(dec)
+        local n = tonumber(dec)
+        return n and utf8.char(n) or ""
+    end)
+    text = string.gsub(text, "&lt;", "<")
+    text = string.gsub(text, "&gt;", ">")
+    text = string.gsub(text, "&quot;", "\"")
+    text = string.gsub(text, "&apos;", "'")
+    text = string.gsub(text, "&amp;", "&")
+    return text
+end
+
+local function parseXml(xml: string)
+    local root = { name = "#document", attrs = {}, children = {}, textParts = {} }
+    local stack = { root }
+    local pos = 1
+    while pos <= #xml do
+        local lt = string.find(xml, "<", pos, true)
+        if not lt then
+            local tail = string.sub(xml, pos)
+            if #tail > 0 then table.insert(stack[#stack].textParts, xmlDecode(tail)) end
+            break
+        end
+        if lt > pos then
+            table.insert(stack[#stack].textParts, xmlDecode(string.sub(xml, pos, lt - 1)))
+        end
+        if string.sub(xml, lt, lt + 8) == "<![CDATA[" then
+            local close = string.find(xml, "]]>", lt + 9, true)
+            if not close then error("unterminated XML CDATA section") end
+            table.insert(stack[#stack].textParts, string.sub(xml, lt + 9, close - 1))
+            pos = close + 3
+        elseif string.sub(xml, lt, lt + 3) == "<!--" then
+            local close = string.find(xml, "-->", lt + 4, true)
+            if not close then error("unterminated XML comment") end
+            pos = close + 3
+        elseif string.sub(xml, lt, lt + 1) == "<?" then
+            local close = string.find(xml, "?>", lt + 2, true)
+            if not close then error("unterminated XML processing instruction") end
+            pos = close + 2
+        elseif string.sub(xml, lt, lt + 1) == "<!" then
+            local close = string.find(xml, ">", lt + 2, true)
+            if not close then error("unterminated XML declaration") end
+            pos = close + 1
+        else
+            local close = string.find(xml, ">", lt + 1, true)
+            if not close then error("unterminated XML tag") end
+            local inside = string.sub(xml, lt + 1, close - 1)
+            if string.sub(inside, 1, 1) == "/" then
+                local name = string.match(inside, "^/%s*([^%s>]+)")
+                if #stack <= 1 or not name or stack[#stack].name ~= name then
+                    error("mismatched XML closing tag " .. tostring(name))
+                end
+                table.remove(stack)
+            else
+                local selfClosing = string.match(inside, "/%s*$") ~= nil
+                if selfClosing then inside = string.gsub(inside, "/%s*$", "") end
+                local name = string.match(inside, "^%s*([^%s]+)")
+                if not name then error("empty XML tag") end
+                local node = { name = name, attrs = {}, children = {}, textParts = {} }
+                local tagName = string.match(inside, "^%s*([^%s]+)")
+                local rest = string.sub(inside, #tagName + 1)
+                while true do
+                    rest = string.gsub(rest, "^%s+", "")
+                    if rest == "" then break end
+                    local attr, afterName = string.match(rest, "^([%w_:%.%-]+)%s*=%s*(.*)$")
+                    if not attr then error("malformed XML attribute") end
+                    local quote = string.sub(afterName, 1, 1)
+                    if quote ~= "'" and quote ~= '\"' then error("unquoted XML attribute") end
+                    local endQuote = string.find(afterName, quote, 2, true)
+                    if not endQuote then error("unterminated XML attribute") end
+                    node.attrs[attr] = xmlDecode(string.sub(afterName, 2, endQuote - 1))
+                    rest = string.sub(afterName, endQuote + 1)
+                end
+                table.insert(stack[#stack].children, node)
+                if not selfClosing then table.insert(stack, node) end
+            end
+            pos = close + 1
+        end
+    end
+    if #stack ~= 1 then error("unclosed XML element " .. tostring(stack[#stack].name)) end
+    local function finish(node)
+        node.text = table.concat(node.textParts)
+        node.textParts = nil
+        for _, child in node.children do finish(child) end
+    end
+    finish(root)
+    return root
+end
+
+local function xmlChild(node, name)
+    for _, child in node.children do
+        if child.name == name then return child end
+    end
+    return nil
+end
+
+local function xmlText(node, name)
+    local child = xmlChild(node, name)
+    return child and child.text or ""
+end
+
+local function xmlTrim(text: string): string
+    return string.match(text, "^%s*(.-)%s*$") or ""
+end
+
+local function xmlNumber(node, name): number
+    return tonumber(xmlTrim(xmlText(node, name))) or 0
+end
+
+local function xmlVector2(node, prefix): Vector2
+    local pre = prefix or ""
+    return Vector2.new(xmlNumber(node, pre .. "X"), xmlNumber(node, pre .. "Y"))
+end
+
+local function xmlVector3(node, prefix): Vector3
+    local pre = prefix or ""
+    return Vector3.new(xmlNumber(node, pre .. "X"), xmlNumber(node, pre .. "Y"), xmlNumber(node, pre .. "Z"))
+end
+
+local function parseRbxmxProperty(prop, sharedStrings)
+    local kind = prop.name
+    local text = xmlTrim(prop.text)
+    if kind == "string" or kind == "ProtectedString" then
+        return prop.text
+    elseif kind == "bool" then
+        return text == "true" or text == "1"
+    elseif kind == "int" or kind == "int64" or kind == "float" or kind == "double" or kind == "token" then
+        return tonumber(text) or 0
+    elseif kind == "Vector3" then
+        return xmlVector3(prop)
+    elseif kind == "Vector2" then
+        return xmlVector2(prop)
+    elseif kind == "Color3" then
+        return Color3.new(xmlNumber(prop, "R"), xmlNumber(prop, "G"), xmlNumber(prop, "B"))
+    elseif kind == "Color3uint8" then
+        return Color3.fromRGB(xmlNumber(prop, "R"), xmlNumber(prop, "G"), xmlNumber(prop, "B"))
+    elseif kind == "UDim" then
+        return UDim.new(xmlNumber(prop, "S"), xmlNumber(prop, "O"))
+    elseif kind == "UDim2" then
+        return UDim2.new(xmlNumber(prop, "XS"), xmlNumber(prop, "XO"), xmlNumber(prop, "YS"), xmlNumber(prop, "YO"))
+    elseif kind == "CFrame" or kind == "CoordinateFrame" then
+        local position = xmlVector3(prop)
+        local matrix = {}
+        for _, key in { "R00", "R01", "R02", "R10", "R11", "R12", "R20", "R21", "R22" } do
+            matrix[#matrix + 1] = xmlNumber(prop, key)
+        end
+        if xmlChild(prop, "R00") then
+            return CFrame.new(position.X, position.Y, position.Z, table.unpack(matrix))
+        end
+        return CFrame.new(position)
+    elseif kind == "Ref" then
+        return { __chainlinkRef = text }
+    elseif kind == "Content" then
+        return xmlText(prop, "url") ~= "" and xmlText(prop, "url") or prop.text
+    elseif kind == "url" then
+        return prop.text
+    elseif kind == "BinaryString" then
+        return decodeBase64(text)
+    elseif kind == "SharedString" then
+        local reference = xmlChild(prop, "SharedString")
+        local key = (reference and reference.attrs.md5) or prop.attrs.md5 or text
+        return sharedStrings[key] or ""
+    elseif kind == "NumberRange" then
+        local min = tonumber(xmlTrim(xmlText(prop, "Min"))) or tonumber(xmlTrim(xmlText(prop, "min"))) or tonumber(prop.attrs.min) or 0
+        local max = tonumber(xmlTrim(xmlText(prop, "Max"))) or tonumber(xmlTrim(xmlText(prop, "max"))) or tonumber(prop.attrs.max) or 0
+        return NumberRange.new(min, max)
+    elseif kind == "Rect" then
+        local minNode = xmlChild(prop, "min") or xmlChild(prop, "Min")
+        local maxNode = xmlChild(prop, "max") or xmlChild(prop, "Max")
+        if minNode and maxNode then
+            return Rect.new(xmlVector2(minNode), xmlVector2(maxNode))
+        end
+        return Rect.new(Vector2.new(xmlNumber(prop, "MinX"), xmlNumber(prop, "MinY")), Vector2.new(xmlNumber(prop, "MaxX"), xmlNumber(prop, "MaxY")))
+    end
+    return nil, "unsupported XML property type " .. kind
+end
+
+local function parseRbxmx(xml: string, rootName: string)
+    local document = parseXml(xml)
+    local roblox = xmlChild(document, "roblox")
+    if not roblox then error("XML model has no <roblox> root") end
+    local sharedStrings = {}
+    local sharedNode = xmlChild(roblox, "SharedStrings")
+    if sharedNode then
+        for _, entry in sharedNode.children do
+            if entry.name == "SharedString" and entry.attrs.md5 then
+                sharedStrings[entry.attrs.md5] = entry.text
+            end
+        end
+    end
+    local holder = Instance.new("Model")
+    holder.Name = rootName
+    local referents = {}
+    local pendingRefs = {}
+    local madeItems = {}
+    local function buildItem(node, parent)
+        local className = node.attrs.class
+        if not className then warn("ChainLink: skipping <Item> without class") return end
+        local ok, inst = pcall(Instance.new, className)
+        if not ok then warn("ChainLink: cannot create XML class " .. className .. ": " .. tostring(inst)) return end
+        inst.Parent = parent
+        if node.attrs.referent and node.attrs.referent ~= "" then referents[node.attrs.referent] = inst end
+        table.insert(madeItems, inst)
+        local properties = xmlChild(node, "Properties")
+        if properties then
+            for _, prop in properties.children do
+                local name = prop.attrs.name
+                if name then
+                    local value, problem = parseRbxmxProperty(prop, sharedStrings)
+                    if problem then
+                        warn("ChainLink: " .. problem .. " (" .. name .. ")")
+                    elseif type(value) == "table" and value.__chainlinkRef then
+                        table.insert(pendingRefs, { inst = inst, property = name, referent = value.__chainlinkRef })
+                    elseif value ~= nil then
+                        if prop.name == "token" and type(value) == "number" then
+                            local enumOk, currentValue = pcall(function() return (inst :: any)[name] end)
+                            if enumOk and typeof(currentValue) == "EnumItem" then
+                                local itemsOk, items = pcall(function() return Enum[currentValue.EnumType.Name]:GetEnumItems() end)
+                                if itemsOk then
+                                    for _, enumItem in items do
+                                        if enumItem.Value == value then value = enumItem break end
+                                    end
+                                end
+                            end
+                        end
+                        local setOk, setErr = pcall(function() (inst :: any)[name] = value end)
+                        if not setOk then warn("ChainLink: cannot set " .. className .. "." .. name .. ": " .. tostring(setErr)) end
+                    end
+                end
+            end
+        end
+        for _, child in node.children do
+            if child.name == "Item" then buildItem(child, inst) end
+        end
+    end
+    for _, node in roblox.children do
+        if node.name == "Item" then buildItem(node, holder) end
+    end
+    for _, ref in pendingRefs do
+        local target = referents[ref.referent]
+        if target then
+            local ok, err = pcall(function() (ref.inst :: any)[ref.property] = target end)
+            if not ok then warn("ChainLink: cannot resolve Ref property " .. ref.property .. ": " .. tostring(err)) end
+        elseif ref.referent ~= "null" and ref.referent ~= "" then
+            warn("ChainLink: unresolved XML referent " .. ref.referent .. " for " .. ref.property)
+        end
+    end
+    return holder
+end
+
+local function setRbxmx(inst, xml: string)
+    local name = inst.Name
+    local parsed = parseRbxmx(xml, name)
+    for _, child in inst:GetChildren() do child:Destroy() end
+    for _, item in parsed:GetChildren() do item.Parent = inst end
+    parsed:Destroy()
+end
+
 local function setModel(inst, ev)
     if ev.modelFormat ~= "rbxm" then
         error(".rbxmx sync payload is XML; convert the model to .rbxm for automatic Studio insertion")
     end
     local bytes = decodeBase64(ev.modelData)
-    local imported = SerializationService:DeserializeInstancesAsync(buffer.fromstring(bytes))
+    local buf = buffer.create(#bytes)
+    for i = 1, #bytes do
+        buffer.writeu8(buf, i - 1, string.byte(bytes, i))
+    end
+    local imported = SerializationService:DeserializeInstancesAsync(buf)
+
     for _, child in inst:GetChildren() do
         child:Destroy()
     end
@@ -443,7 +711,15 @@ local function setModel(inst, ev)
 end
 
 local function setSource(inst, source, ev)
-    if ev and ev.modelData then
+    if ev and string.lower(ev.path or ""):sub(-6) == ".rbxmx" then
+        local xml = ev.source or ev.contents or ev.modelData or source
+        if type(xml) ~= "string" then error(".rbxmx payload has no XML text") end
+        if string.sub(xml, 1, 5) ~= "<?xml" and not string.find(xml, "<roblox", 1, true) then
+            local decodedOk, decoded = pcall(decodeBase64, xml)
+            if decodedOk and string.find(decoded, "<roblox", 1, true) then xml = decoded end
+        end
+        setRbxmx(inst, xml)
+    elseif ev and ev.modelData then
         if not inst:IsA("Model") then
             error("model file did not resolve to a Model instance")
         end
@@ -478,11 +754,17 @@ local function applyCreateOrUpdate(ev)
     end
 
     local name = segments[#segments]
+    local isRbxmx = string.lower(ev.path or ""):sub(-6) == ".rbxmx"
+    local targetClass = isRbxmx and "Model" or ev.className
     local inst = parent:FindFirstChild(name)
-    if inst and inst.ClassName ~= ev.className then
-        inst = replaceInstance(inst, ev.className)
+    if isRbxmx and inst then
+        inst:Destroy()
+        inst = nil
+    end
+    if inst and inst.ClassName ~= targetClass then
+        inst = replaceInstance(inst, targetClass)
     elseif not inst then
-        inst = Instance.new(ev.className)
+        inst = Instance.new(targetClass)
         inst.Name = name
         inst.Parent = parent
     end

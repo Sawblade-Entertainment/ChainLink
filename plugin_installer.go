@@ -3,6 +3,7 @@ package main
 import (
 	_ "embed"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -80,8 +81,9 @@ func installPlugin() error {
 		return fmt.Errorf("failed to create plugins directory: %w", err)
 	}
 
-	// Use the XML format for maximum compatibility with Studio
-	content := fmt.Sprintf(rbxmxTemplate, pluginSource)
+	// Escape the source code to prevent XML corruption
+	escapedSource := html.EscapeString(pluginSource)
+	content := fmt.Sprintf(rbxmxTemplate, escapedSource)
 	destPath := filepath.Join(pluginsDir, "ChainLink.rbxmx")
 
 	err = os.WriteFile(destPath, []byte(content), 0644)
@@ -95,3 +97,5 @@ func installPlugin() error {
 	fmt.Printf("Successfully installed ChainLink plugin to %s\n", destPath)
 	return nil
 }
+
+// Removed main to avoid conflict with main.go
