@@ -438,6 +438,143 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 	})
 }
 
+// scriptClassForFile maps a Rojo-style filename to a Roblox script class.
+// Returns the class and the instance name (with the suffix stripped).
+func scriptClassForFile(name string) (class, instName string, ok bool) {
+	lower := strings.ToLower(name)
+	var ext string
+	switch {
+	case strings.HasSuffix(lower, ".luau"):
+		ext = name[len(name)-5:]
+	case strings.HasSuffix(lower, ".lua"):
+		ext = name[len(name)-4:]
+	default:
+		return "", "", false
+	}
+	base := name[:len(name)-len(ext)]
+	switch {
+	case strings.HasSuffix(strings.ToLower(base), ".server"):
+		return "Script", base[:len(base)-len(".server")], true
+	case strings.HasSuffix(strings.ToLower(base), ".client"):
+		return "LocalScript", base[:len(base)-len(".client")], true
+	default:
+		return "ModuleScript", base, true
+	}
+}
+
+// syncModelDir walks absDir and builds an instance tree beneath parent.
+// Directories become Folders (or scripts, if they contain an init.* file),
+// scripts/json become the appropriate script class, and .rbxmx files are
+// embedded verbatim.
+func (b *Builder) syncModelDir(absDir string, parent *Instance) {
+	entries, err := os.ReadDir(absDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "build: cannot read %s: %v\n", absDir, err)
+		return
+	}
+
+	// First pass: an init.lua / init.server.lua / init.client.lua turns the
+	// parent folder itself into a script.
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		class, name, ok := scriptClassForFile(e.Name())
+		if !ok || !strings.EqualFold(name, "init") {
+			continue
+		}
+		path := filepath.Join(absDir, e.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		parent.Class = class
+		setSource(parent, string(data))
+		parent.FilePath = path
+	}
+
+	for _, e := range entries {
+		path := filepath.Join(absDir, e.Name())
+		name := e.Name()
+
+		if e.IsDir() {
+			child := &Instance{Referent: b.newReferent(), Class: "Folder", Name: name}
+			parent.Children = append(parent.Children, child)
+			b.syncModelDir(path, child)
+			continue
+		}
+
+		lower := strings.ToLower(name)
+		switch {
+		case strings.HasSuffix(lower, ".lua"), strings.HasSuffix(lower, ".luau"):
+			class, instName, _ := scriptClassForFile(name)
+			if strings.EqualFold(instName, "init") {
+				continue // already applied to parent
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			child := &Instance{Referent: b.newReferent(), Class: class, Name: instName, FilePath: path}
+			setSource(child, string(data))
+			parent.Children = append(parent.Children, child)
+
+		case strings.HasSuffix(lower, ".json"):
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			source := string(data)
+			var parsed any
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				source = "return " + source
+			} else {
+				source = "return " + jsonToLuau(parsed)
+			}
+			child := &Instance{Referent: b.newReferent(), Class: "ModuleScript", Name: strings.TrimSuffix(name, filepath.Ext(name)), FilePath: path}
+			setSource(child, source)
+			parent.Children = append(parent.Children, child)
+
+		case strings.HasSuffix(lower, ".rbxmx"):
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			if err := extractSharedStrings(data, b.sharedStrings); err != nil {
+				fmt.Fprintf(os.Stderr, "build: error extracting shared strings from %s: %v\n", name, err)
+			}
+			items, err := extractItems(data)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "build: skipping %s: %v\n", name, err)
+				continue
+			}
+			model := &Instance{Referent: b.newReferent(), Class: "Model", Name: strings.TrimSuffix(name, filepath.Ext(name))}
+			for _, raw := range items {
+				model.Children = append(model.Children, &Instance{RawXML: raw})
+			}
+			parent.Children = append(parent.Children, model)
+
+		case strings.HasSuffix(lower, ".rbxm"):
+			fmt.Fprintf(os.Stderr, "build: skipping %s: binary .rbxm cannot be embedded in XML output; convert it to .rbxmx\n", name)
+
+		default:
+			fmt.Fprintf(os.Stderr, "build: skipping %s (unsupported file type)\n", name)
+		}
+	}
+}
+
+// buildModel packages the src/ directory into a single top-level Folder.
+func (b *Builder) buildModel(modelName string) error {
+	srcDir := filepath.Join(b.root, "src")
+	if !dirExists(srcDir) {
+		return fmt.Errorf("build: no src/ directory found in %s", b.root)
+	}
+	rootInst := &Instance{Referent: b.newReferent(), Class: "Folder", Name: modelName}
+	b.top = append(b.top, rootInst)
+	b.syncModelDir(srcDir, rootInst)
+	return nil
+}
+
 func handleBuild(outputPath string) error {
 	cfg := loadConfig()
 	root, err := os.Getwd()
@@ -447,35 +584,47 @@ func handleBuild(outputPath string) error {
 
 	b := NewBuilder(cfg, root)
 
-	for _, s := range []string{"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterPlayer"} {
-		b.service(s)
-	}
-	b.resolveTarget("StarterPlayer.StarterPlayerScripts")
-
-	b.syncBootstrap()
-
-	for _, r := range cfg.Roots {
-		absDir := filepath.Join(root, r.Dir)
-		if dirExists(absDir) {
-			b.syncDir(absDir, r.Target, "")
-		}
-	}
-	for _, p := range cfg.Packages {
-		absDir := filepath.Join(packagesBase(), filepath.FromSlash(p.PackageName))
-		if !dirExists(absDir) {
-			continue
+	switch strings.ToLower(filepath.Ext(outputPath)) {
+	case ".rbxmx":
+		// Model build: package src/ as a standalone model, no services/bootstrap.
+		name := strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))
+		if err := b.buildModel(name); err != nil {
+			return err
 		}
 
-		// If there is a "src" directory, use it as the root for syncing.
-		srcDir := filepath.Join(absDir, "src")
-		if dirExists(srcDir) {
-			// Sync from src/, but treat it as the package root.
-			// We pass an empty relPrefix because the files inside src/
-			// should be mapped directly to the package target.
-			b.syncDir(srcDir, p.Target, "")
-		} else {
-			b.syncDir(absDir, p.Target, "")
+	case ".rbxlx":
+		// Place build (existing behaviour).
+		for _, s := range []string{"Workspace", "ReplicatedStorage", "ServerScriptService", "ServerStorage", "StarterPlayer"} {
+			b.service(s)
 		}
+		b.resolveTarget("StarterPlayer.StarterPlayerScripts")
+
+		b.syncBootstrap()
+
+		for _, r := range cfg.Roots {
+			absDir := filepath.Join(root, r.Dir)
+			if dirExists(absDir) {
+				b.syncDir(absDir, r.Target, "")
+			}
+		}
+		for _, p := range cfg.Packages {
+			absDir := filepath.Join(packagesBase(), filepath.FromSlash(p.PackageName))
+			if !dirExists(absDir) {
+				continue
+			}
+			srcDir := filepath.Join(absDir, "src")
+			if dirExists(srcDir) {
+				b.syncDir(srcDir, p.Target, "")
+			} else {
+				b.syncDir(absDir, p.Target, "")
+			}
+		}
+
+	case ".rbxl", ".rbxm":
+		return fmt.Errorf("build: binary formats are not supported; use .rbxlx or .rbxmx")
+
+	default:
+		return fmt.Errorf("build: unknown output format %q (expected .rbxlx or .rbxmx)", filepath.Ext(outputPath))
 	}
 
 	return os.WriteFile(outputPath, b.build(), 0644)
