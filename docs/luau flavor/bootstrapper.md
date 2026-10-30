@@ -20,7 +20,7 @@ Every module loaded by the bootstrapper can implement a set of lifecycle methods
 | Method | Timing | Description |
 | :--- | :--- | :--- |
 | `:draw(dt)` | **Per-Frame** | Called every `RunService.RenderStepped` (before each frame renders). |
-| `:input(input, gameProcessed, phase)` | **Event-Driven** | Called on `UserInputService` events. `phase` is `"began"`, `"ended"`, or `"changed"`. |
+| `:input(pressed, input)` | **Event-Driven** | Called on `UserInputService` events. |
 
 ### Server-Only Lifecycle
 
