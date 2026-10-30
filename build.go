@@ -37,8 +37,8 @@ type Builder struct {
 	sourcemap     map[string]string // roblox_path -> local_path
 }
 
-var InjectGlobals = `local __clOldRequireGlob = require
-function require(m)
+var InjectGlobals = map[string]string{
+	"= use": `function use(m)
 	if type(m) == "string" and m:sub(1,1) ~= "." and m:sub(1,1) ~= "@" then
 		if string.lower(m) == m then
 			m = game.ReplicatedStorage:WaitForChild("packages"):WaitForChild(m)
@@ -46,8 +46,11 @@ function require(m)
 			return game:GetService(m)
 		end
 	end
-	return __clOldRequireGlob(m)
-end`
+	return require(m)
+end
+`,
+	"= new": "function new(c) return Instance.new(c) end\n",
+}
 
 func NewBuilder(cfg ProjectConfig, root string) *Builder {
 	return &Builder{
@@ -341,7 +344,13 @@ func parseScript(cfg ProjectConfig, source string, fullRel string) string {
 			"\nreturn mod"
 	}
 
-	return addLuauHeader(InjectGlobals + "\n" + source)
+	for macro, method := range InjectGlobals {
+		if strings.Contains(source, macro) {
+			source = method + source
+		}
+	}
+
+	return addLuauHeader(source)
 }
 
 func (b *Builder) syncDir(absDir, target, relPrefix string) {

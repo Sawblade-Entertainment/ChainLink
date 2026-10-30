@@ -54,7 +54,8 @@ end`
     ]
 }`
 	VSCodeGlobals = `declare mod: any
-declare require: (module: any) -> any
+declare use: (module: any) -> any
+declare new: (instance: string) -> Instance
 declare module: any`
 )
 
