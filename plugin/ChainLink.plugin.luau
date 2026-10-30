@@ -1,5 +1,4 @@
 --!strict
---!native
 --!optimize 2
 -- ChainLink Studio sync plugin
 
@@ -34,7 +33,7 @@ local function themed(fn: () -> ())
     fn()
 end
 
-local function color(c, m): Color3
+local function color(c: Enum.StudioStyleGuideColor, m: Enum.StudioStyleGuideModifier?): Color3
     return Studio.Theme:GetColor(c, m or SGM.Default)
 end
 
@@ -56,7 +55,7 @@ local widget = plugin:CreateDockWidgetPluginGuiAsync(
 )
 widget.Title = "ChainLink"
 
-local function make(class: string, props: { [string]: any }, parent): any
+local function make(class: string, props: { [string]: any }, parent: Instance?): any
     local inst = Instance.new(class)
     for k, v in props do
         (inst :: any)[k] = v
@@ -275,7 +274,7 @@ local function levelColor(level: LogLevel): Color3
 end
 
 local logCount = 0
-local function logLine(msg: string, level): any
+local function logLine(msg: string, level: LogLevel?)
     logCount += 1
     local lvl: LogLevel = level or "info"
     local line = make("TextLabel", {
@@ -542,12 +541,12 @@ local function xmlNumber(node, name): number
     return tonumber(xmlTrim(xmlText(node, name))) or 0
 end
 
-local function xmlVector2(node, prefix): Vector2
+local function xmlVector2(node, prefix)
     local pre = prefix or ""
     return Vector2.new(xmlNumber(node, pre .. "X"), xmlNumber(node, pre .. "Y"))
 end
 
-local function xmlVector3(node, prefix): Vector3
+local function xmlVector3(node, prefix)
     local pre = prefix or ""
     return Vector3.new(xmlNumber(node, pre .. "X"), xmlNumber(node, pre .. "Y"), xmlNumber(node, pre .. "Z"))
 end
@@ -610,7 +609,7 @@ local function parseRbxmxProperty(prop, sharedStrings)
     return nil, "unsupported XML property type " .. kind
 end
 
-local function parseRbxmx(xml: string, rootName: string)
+local function parseRbxmx(xml: string)
     local document = parseXml(xml)
     local roblox = xmlChild(document, "roblox")
     if not roblox then error("XML model has no <roblox> root") end
@@ -623,8 +622,8 @@ local function parseRbxmx(xml: string, rootName: string)
             end
         end
     end
-    local holder = Instance.new("Model")
-    holder.Name = rootName
+    local topLevelItems = {}
+    local topLevelCount = 0
     local referents = {}
     local pendingRefs = {}
     local madeItems = {}
@@ -669,7 +668,14 @@ local function parseRbxmx(xml: string, rootName: string)
         end
     end
     for _, node in roblox.children do
-        if node.name == "Item" then buildItem(node, holder) end
+        if node.name == "Item" then
+            topLevelCount += 1
+            local before = #madeItems
+            buildItem(node, nil)
+            if #madeItems > before then
+                table.insert(topLevelItems, madeItems[before + 1])
+            end
+        end
     end
     for _, ref in pendingRefs do
         local target = referents[ref.referent]
@@ -680,28 +686,48 @@ local function parseRbxmx(xml: string, rootName: string)
             warn("ChainLink: unresolved XML referent " .. ref.referent .. " for " .. ref.property)
         end
     end
-    return holder
+    return topLevelItems, topLevelCount
 end
 
-local function setRbxmx(inst, xml: string)
-    local name = inst.Name
-    local parsed = parseRbxmx(xml, name)
-    for _, child in inst:GetChildren() do child:Destroy() end
-    for _, item in parsed:GetChildren() do item.Parent = inst end
-    parsed:Destroy()
+local function setRbxmx(parent: Instance, name: string, key: string, xml: string): Instance?
+    local items, rootCount = parseRbxmx(xml)
+    if rootCount == 0 then
+        warn("ChainLink: .rbxmx has no top-level <Item>; skipping " .. name)
+        return nil
+    end
+    if #items == 0 then
+        warn("ChainLink: .rbxmx top-level items could not be created; skipping " .. name)
+        return nil
+    end
+
+    local synced: Instance
+    if rootCount == 1 and #items == 1 then
+        synced = items[1]
+        -- Name the synced root after the file for consistency with other synced files.
+        synced.Name = name
+    else
+        warn("ChainLink: .rbxmx has multiple top-level <Item> roots; using a Folder for " .. name)
+        local folder = Instance.new("Folder")
+        folder.Name = name
+        for _, item in items do
+            item.Parent = folder
+        end
+        synced = folder
+    end
+
+    local existing = parent:FindFirstChild(name)
+    if existing then existing:Destroy() end
+    synced:SetAttribute(ATTR, key)
+    synced.Parent = parent
+    return synced
 end
 
 local function setModel(inst, ev)
     if ev.modelFormat ~= "rbxm" then
-        error(".rbxmx sync payload is XML; convert the model to .rbxm for automatic Studio insertion")
+        error(".rbxm sync payload must be binary model data for automatic Studio insertion")
     end
     local bytes = decodeBase64(ev.modelData)
-    local buf = buffer.create(#bytes)
-    for i = 1, #bytes do
-        buffer.writeu8(buf, i - 1, string.byte(bytes, i))
-    end
-    local imported = SerializationService:DeserializeInstancesAsync(buf)
-
+    local imported = SerializationService:DeserializeInstancesAsync(buffer.fromstring(bytes))
     for _, child in inst:GetChildren() do
         child:Destroy()
     end
@@ -711,15 +737,7 @@ local function setModel(inst, ev)
 end
 
 local function setSource(inst, source, ev)
-    if ev and string.lower(ev.path or ""):sub(-6) == ".rbxmx" then
-        local xml = ev.source or ev.contents or ev.modelData or source
-        if type(xml) ~= "string" then error(".rbxmx payload has no XML text") end
-        if string.sub(xml, 1, 5) ~= "<?xml" and not string.find(xml, "<roblox", 1, true) then
-            local decodedOk, decoded = pcall(decodeBase64, xml)
-            if decodedOk and string.find(decoded, "<roblox", 1, true) then xml = decoded end
-        end
-        setRbxmx(inst, xml)
-    elseif ev and ev.modelData then
+    if ev and ev.modelData then
         if not inst:IsA("Model") then
             error("model file did not resolve to a Model instance")
         end
@@ -755,12 +773,27 @@ local function applyCreateOrUpdate(ev)
 
     local name = segments[#segments]
     local isRbxmx = string.lower(ev.path or ""):sub(-6) == ".rbxmx"
-    local targetClass = isRbxmx and "Model" or ev.className
-    local inst = parent:FindFirstChild(name)
-    if isRbxmx and inst then
-        inst:Destroy()
-        inst = nil
+    if isRbxmx and string.lower(name):sub(-6) == ".rbxmx" then
+        name = string.sub(name, 1, #name - 7)
     end
+    if isRbxmx then
+        local xml = ev.source or ev.contents or ev.modelData or ""
+        if type(xml) ~= "string" then error(".rbxmx payload has no XML text") end
+        if string.sub(xml, 1, 5) ~= "<?xml" and not string.find(xml, "<roblox", 1, true) then
+            local decodedOk, decoded = pcall(decodeBase64, xml)
+            if decodedOk and string.find(decoded, "<roblox", 1, true) then xml = decoded end
+        end
+        local ok, synced = pcall(setRbxmx, parent, name, key, xml)
+        if not ok then
+            logLine(".rbxmx import failed: " .. tostring(synced), "error")
+        elseif synced then
+            instanceCache[key] = synced
+        end
+        return
+    end
+
+    local targetClass = ev.className
+    local inst = parent:FindFirstChild(name)
     if inst and inst.ClassName ~= targetClass then
         inst = replaceInstance(inst, targetClass)
     elseif not inst then
@@ -778,7 +811,15 @@ end
 
 local function applyDelete(ev)
     local key = keyFor(ev.target, ev.instancePath)
-    local inst = findInstance(ev.target, ev.instancePath)
+    local lookupSegments = ev.instancePath
+    if string.lower(ev.path or ""):sub(-6) == ".rbxmx" and #ev.instancePath > 0 then
+        lookupSegments = table.clone(ev.instancePath)
+        local last = lookupSegments[#lookupSegments]
+        if string.lower(last):sub(-6) == ".rbxmx" then
+            lookupSegments[#lookupSegments] = string.sub(last, 1, #last - 7)
+        end
+    end
+    local inst = findInstance(ev.target, lookupSegments)
     instanceCache[key] = nil
     if not inst then
         return

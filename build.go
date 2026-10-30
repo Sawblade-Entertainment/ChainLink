@@ -108,6 +108,10 @@ func (b *Builder) place(target string, instancePath []string, leafClass string) 
 		class := "Folder"
 		if i == len(instancePath)-1 && leafClass != "" {
 			class = leafClass
+		} else if i == len(instancePath)-1 && leafClass == "" {
+			// When leafClass is empty, we are resolving a path to a folder
+			// but we don't want to create a new folder if it's just a path.
+			// Wait, the logic here always creates a folder via getOrCreate.
 		}
 		cur = b.getOrCreate(fullPath, class, seg, cur)
 	}
@@ -420,12 +424,28 @@ func (b *Builder) syncDir(absDir, target, relPrefix string) {
 				fmt.Fprintf(os.Stderr, "build: skipping %s: %v\n", rel, err)
 				return nil
 			}
-			// Preserve the mapped filename as a Model, with the imported model
-			// tree nested beneath that node.
-			model := b.place(c.Target, c.InstancePath, "Model")
-			model.Class = "Model" // upgrade if a same-name folder was visited first
+			// Import the model tree directly into the target location.
+			// We navigate to the parent of where the file would have been.
+			var parent *Instance
+			if len(c.InstancePath) == 0 {
+				parent = b.resolveTarget(c.Target)
+			} else {
+				// We want the folder that contains the last segment of InstancePath
+				// So we navigate up to len-1
+				parent = b.resolveTarget(c.Target)
+				for i := 0; i < len(c.InstancePath)-1; i++ {
+					seg := c.InstancePath[i]
+					path := c.Target + "." + strings.Join(c.InstancePath[:i+1], ".")
+					parent = b.getOrCreate(path, "Folder", seg, parent)
+				}
+				// The last segment of InstancePath is the "filename" part of the roblox path.
+				// For .rbxmx files, the user might have specified a path like "ReplicatedStorage.Assets.MyModel"
+				// where MyModel is the .rbxmx file. In this case, we want to place the contents
+				// of MyModel.rbxmx directly under "Assets".
+				// However, if the .rbxmx itself defines the root item, we just need the parent.
+			}
 			for _, raw := range items {
-				model.Children = append(model.Children, &Instance{RawXML: raw})
+				parent.Children = append(parent.Children, &Instance{RawXML: raw})
 			}
 
 		case strings.EqualFold(filepath.Ext(path), ".rbxm"):
@@ -548,11 +568,10 @@ func (b *Builder) syncModelDir(absDir string, parent *Instance) {
 				fmt.Fprintf(os.Stderr, "build: skipping %s: %v\n", name, err)
 				continue
 			}
-			model := &Instance{Referent: b.newReferent(), Class: "Model", Name: strings.TrimSuffix(name, filepath.Ext(name))}
+			// Import the model items directly into the parent.
 			for _, raw := range items {
-				model.Children = append(model.Children, &Instance{RawXML: raw})
+				parent.Children = append(parent.Children, &Instance{RawXML: raw})
 			}
-			parent.Children = append(parent.Children, model)
 
 		case strings.HasSuffix(lower, ".rbxm"):
 			fmt.Fprintf(os.Stderr, "build: skipping %s: binary .rbxm cannot be embedded in XML output; convert it to .rbxmx\n", name)
